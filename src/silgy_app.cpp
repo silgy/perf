@@ -89,7 +89,7 @@ void sendreqs(int ci)
     strcpy(AUS.url, url);
     AUS.times = atoi(times);
     if ( AUS.times < 1 ) AUS.times = 1;
-    if ( AUS.times > 1001 ) AUS.times = 1000;
+    if ( AUS.times > 1000 ) AUS.times = 1000;
 
     INF("URL [%s]", AUS.url);
     INF("times = %d", AUS.times);

@@ -2,6 +2,8 @@
 
 echo "Stopping Silgy..."
 
+xport SILGYDIR=/home/ec2-user/perf
+
 # ---------------------------------------------------------------------
 # Services
 

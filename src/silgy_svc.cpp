@@ -22,7 +22,7 @@ ausession_t auses;
 -------------------------------------------------------------------------- */
 int sendreqs()
 {
-    INF("endreqs");
+    INF("sendreqs");
 
     INF("URL [%s]", AUS.url);
     INF("times = %d", AUS.times);

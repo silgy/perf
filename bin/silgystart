@@ -2,18 +2,28 @@
 
 echo "Starting Silgy..."
 
+xport SILGYDIR=/home/ec2-user/perf
+
 # ---------------------------------------------------------------------
 # Main app
 
-nohup $SILGYDIR/bin/silgy_app &
+nohup $SILGYDIR/bin/silgy_app 1235 &
+
 sleep 1
 
 # ---------------------------------------------------------------------
 # Services
 # Start as many as you need
 
-#nohup $SILGYDIR/bin/silgy_svc &
-#nohup $SILGYDIR/bin/silgy_svc &
-#nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
+nohup $SILGYDIR/bin/silgy_svc &
 
-#sleep 1  # return to prompt
+sleep 1  # return to prompt
