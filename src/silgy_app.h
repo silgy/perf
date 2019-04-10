@@ -20,6 +20,7 @@
 
 #define MEM_MEDIUM
 #define SILGY_AS_BOT
+#define DUMP
 
 #define WAIT            "onClick=\"wait();\""
 #define ONKEYDOWN		"onkeydown=\"ent(event);\""
