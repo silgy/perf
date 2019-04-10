@@ -2,7 +2,7 @@
 
 echo "Starting Silgy..."
 
-xport SILGYDIR=/home/ec2-user/perf
+export SILGYDIR=/home/ec2-user/perf
 
 # ---------------------------------------------------------------------
 # Main app
