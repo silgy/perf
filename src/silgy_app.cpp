@@ -1,13 +1,101 @@
 /* --------------------------------------------------------------------------
    Silgy Web App
    Jurek Muszynski
-   silgy.com
 -----------------------------------------------------------------------------
-   Hello World Sample Silgy Web Application
+   Web App Performance Tester
 -------------------------------------------------------------------------- */
 
 
 #include <silgy.h>
+
+
+ausession_t auses[MAX_SESSIONS+1];
+
+
+/* --------------------------------------------------------------------------
+   Output HTML & page header
+-------------------------------------------------------------------------- */
+void gen_header(int ci)
+{
+    OUT("<!DOCTYPE html>");
+    OUT("<html>");
+    OUT("<head>");
+    OUT("<title>%s</title>", APP_WEBSITE);
+    if ( REQ_MOB )  // if mobile request
+        OUT("<meta name=\"viewport\" content=\"width=device-width\">");
+    OUT("<link rel=\"stylesheet\" type=\"text/css\" href=\"dsk.css\">");
+    OUT("<script src=\"dsk.js\"></script>");
+    OUT("</head>");
+
+    OUT("<body>");
+
+    if ( REQ("") || REQ("dashboard") )
+        OUT("<h1>%s</h1>", APP_WEBSITE);
+    else
+        OUT("<h1><a href=\"/\" %s>%s</a></h1>", WAIT, APP_WEBSITE);
+
+    char lnk_home[256]="<a href=\"/\" onClick=\"wait();\">Home</a>";
+
+    if ( REQ("") )
+        strcpy(lnk_home, "Home");
+
+    OUT("<div class=mm>");
+    if ( !REQ("") ) OUT(lnk_home);
+    OUT("</div>");
+}
+
+
+/* --------------------------------------------------------------------------
+   Output footer; body & html tags close here
+-------------------------------------------------------------------------- */
+void gen_footer(int ci)
+{
+    OUT("<div id=\"wait\" class=wt></div>");
+    OUT("<script>");
+    APPEND_CSS("https://fonts.googleapis.com/css?family=Roboto", TRUE);
+    OUT("</script>");
+    OUT("</body></html>");
+}
+
+
+/* --------------------------------------------------------------------------
+   Show main page
+-------------------------------------------------------------------------- */
+void gen_page_main(int ci)
+{
+    gen_header(ci);
+
+    OUT("<table class=m10>");
+    OUT("<tr><td class=\"gr rt\">URL:</td><td><input id=\"url\" style=\"width:40em;\" value=\"127.0.0.1:1234\" autofocus %s></td></tr>", ONKEYDOWN);
+    OUT("<tr><td class=\"gr rt\">Batches:</td><td><input id=\"batches\" value=\"1\" %s></td></tr>", ONKEYDOWN);
+    OUT("<tr><td class=\"gr rt\">Times:</td><td><input id=\"times\" value=\"10\" %s></td></tr>", ONKEYDOWN);
+    OUT("<tr><td></td><td><button id=\"sbm\" onClick=\"sendreqs();\" style=\"width:7em;height:2.2em;\">Go!</button></td></tr>");
+    OUT("</table>");
+
+    gen_footer(ci);
+}
+
+
+/* --------------------------------------------------------------------------
+   Send requests (AJAX)
+-------------------------------------------------------------------------- */
+void sendreqs(int ci)
+{
+    QSVAL url;
+    if ( !QS("url", url) ) return;
+    QSVAL times;
+    if ( !QS("times", times) ) return;
+
+    strcpy(AUS.url, url);
+    AUS.times = atoi(times);
+    if ( AUS.times < 1 ) AUS.times = 1;
+    if ( AUS.times > 1001 ) AUS.times = 1000;
+
+    INF("URL [%s]", AUS.url);
+    INF("times = %d", AUS.times);
+
+    CALL_ASYNC_TM("sendreqs", NULL, 600);   // 10 minutes timeout
+}
 
 
 /* --------------------------------------------------------------------------------
@@ -20,44 +108,10 @@
 -------------------------------------------------------------------------------- */
 void silgy_app_main(int ci)
 {
-    if ( REQ("") )  // landing page
-    {
-        OUT_HTML_HEADER;
-        OUT("<h1>%s</h1>", APP_WEBSITE);
-        OUT("<h2>Welcome to my web app!</h2>");
-        OUT("<p>Click <a href=\"welcome\">here</a> to try my welcoming bot.</p>");
-        OUT_HTML_FOOTER;
-    }
-    else if ( REQ("welcome") )  // welcoming bot
-    {
-        OUT_HTML_HEADER;
-        OUT("<h1>%s</h1>", APP_WEBSITE);
-
-        // show form
-
-        OUT("<p>Please enter your name:</p>");
-        OUT("<form action=\"welcome\"><input name=\"firstname\" autofocus> <input type=\"submit\" value=\"Run\"></form>");
-
-        QSVAL qs_firstname;  // query string value
-
-        // bid welcome
-
-        if ( QS("firstname", qs_firstname) )  // firstname present in query string, copy it to qs_firstname
-        {
-            DBG("query string arrived with firstname %s", qs_firstname);  // this will write to the log file
-            OUT("<p>Welcome %s, my dear friend!</p>", qs_firstname);
-        }
-
-        // show link to main page
-
-        OUT("<p><a href=\"/\">Back to landing page</a></p>");
-
-        OUT_HTML_FOOTER;
-    }
-    else  // page not found
-    {
-        RES_STATUS(404);
-    }
+    if ( REQ("sendreqs") )
+        sendreqs(ci);
+    else
+        gen_page_main(ci);
 }
 
 
@@ -65,10 +119,27 @@ void silgy_app_main(int ci)
    ******* Only for ASYNC *******
    ------------------------------
    Called after CALL_ASYNC()
-   when response has been received from silgy_svc process
+   when response has been received from silgy_services process
 -------------------------------------------------------------------------------- */
 void silgy_app_continue(int ci, const char *data)
 {
+    OUT("%d|", ASYNC_ERR_CODE);
+
+    if ( ASYNC_ERR_CODE == ERR_ASYNC_TIMEOUT )
+        OUT("Timeout");
+    else if ( ASYNC_ERR_CODE == ERR_REMOTE_CALL )
+        OUT("Call failed");
+    else if ( ASYNC_ERR_CODE == ERR_REMOTE_CALL_STATUS )
+        OUT("Call response status wasn't successful");
+    else if ( ASYNC_ERR_CODE == OK )
+        OUT("OK");
+
+    char formatted[64];
+    amtd(formatted, G_rest_average);
+    OUT("|%s", formatted);
+    OUT("|%f", AUS.elapsed);
+
+    RES_DONT_CACHE;
 }
 
 
@@ -123,16 +194,16 @@ bool silgy_app_user_login(int ci)
    ------------------------------
    Called when downgrading logged in user session to anonymous
 -------------------------------------------------------------------------------- */
-void silgy_app_user_logout(int ci)
+void silgy_app_user_logout(int usi)
 {
 }
 
 
 /* --------------------------------------------------------------------------------
-   Called when closing anonymous user session
+   Called when closing user session
    After calling this the session memory will be zero-ed
 -------------------------------------------------------------------------------- */
-void silgy_app_session_done(int ci)
+void silgy_app_session_done(int usi)
 {
 }
 
