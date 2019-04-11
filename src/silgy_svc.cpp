@@ -39,11 +39,11 @@ int sendreqs()
             ERR("Remote call failed");
             return ERR_REMOTE_CALL;
         }
-        else if ( !CALL_HTTP_STATUS_OK )
-        {
-            WAR("Remote call status %d", CALL_HTTP_STATUS);
-            return ERR_REMOTE_CALL_STATUS;
-        }
+//        else if ( !CALL_HTTP_STATUS_OK )
+//        {
+//            WAR("Remote call status %d", CALL_HTTP_STATUS);
+//            return ERR_REMOTE_CALL_STATUS;
+//        }
 
         DBG("Remote call OK");
     }

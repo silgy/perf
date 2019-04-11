@@ -1,8 +1,8 @@
 #!/bin/sh
 
-#cd ../bin
-#silgystop
-#cd ../src
+cd ../bin
+silgystop
+cd ../src
 
 echo Making silgy_app...
 
@@ -23,6 +23,6 @@ g++ silgy_svc.cpp \
 -lrt \
 -o ../bin/silgy_svc
 
-#cd ../bin
-#silgystart
-#cd ../src
+cd ../bin
+silgystart
+cd ../src
