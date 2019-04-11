@@ -1,5 +1,0 @@
-#!/bin/sh
-
-SILGYDIR=..
-
-../bin/silgy_app 8080
