@@ -81,16 +81,20 @@ void gen_page_main(int ci)
 -------------------------------------------------------------------------- */
 void sendreqs(int ci)
 {
+    QSVAL batch;
+    if ( !QS("batch", batch) ) return;
     QSVAL url;
     if ( !QS("url", url) ) return;
     QSVAL times;
     if ( !QS("times", times) ) return;
 
+    AUS.batch = atoi(batch);
     strcpy(AUS.url, url);
     AUS.times = atoi(times);
     if ( AUS.times < 1 ) AUS.times = 1;
     if ( AUS.times > 1000 ) AUS.times = 1000;
 
+    INF("batch = %d", AUS.batch);
     INF("URL [%s]", AUS.url);
     INF("times = %d", AUS.times);
 

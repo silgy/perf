@@ -10,7 +10,7 @@
 
 
 #define APP_WEBSITE                 "Web App Performance Tester"
-#define APP_VERSION                 "0.2"
+#define APP_VERSION                 "0.3"
 #define APP_DEF_AUTH_LEVEL          AUTH_LEVEL_ANONYMOUS
 
 
@@ -20,16 +20,18 @@
 
 #define MEM_MEDIUM
 #define SILGY_AS_BOT
+#define FD_MON_POLL
 //#define DUMP
 
 #define WAIT            "onClick=\"wait();\""
-#define ONKEYDOWN		"onkeydown=\"ent(event);\""
+#define ONKEYDOWN       "onkeydown=\"ent(event);\""
 
 
 /* app user session */
 
 typedef struct {
     char url[256];
+    int  batch;
     int  times;
     double elapsed;
 } ausession_t;

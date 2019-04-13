@@ -2,7 +2,7 @@
    Silgy Web App
    Jurek Muszynski
 -----------------------------------------------------------------------------
-   Sample service module
+   Web App Performance Tester
 -------------------------------------------------------------------------- */
 
 
@@ -24,19 +24,28 @@ int sendreqs()
 {
     INF("sendreqs");
 
+    INF("batch = %d", AUS.batch);
     INF("URL [%s]", AUS.url);
     INF("times = %d", AUS.times);
 
     struct timespec start;
     clock_gettime(MONOTONIC_CLOCK_NAME, &start);
 
+    str1k tmp;
+
     for ( int i=0; i<AUS.times; ++i )
     {
-        DBG("Request #%d", i);
+        DBG_LINE_LONG;
+        DBG_LINE_LONG;
+
+        sprintf(tmp, "%02d%02d%02d%04d%04d", G_ptm->tm_hour, G_ptm->tm_min, G_ptm->tm_sec, AUS.batch, i);
+        DBG("perfreqid: %s", tmp);
+        REST_HEADER_SET("perfreqid", tmp);
 
         if ( !CALL_HTTP(NULL, NULL, "GET", AUS.url) )
         {
-            ERR("Remote call failed");
+            ERR("Remote call failed\n");
+            AUS.elapsed = lib_elapsed(&start);
             return ERR_REMOTE_CALL;
         }
 //        else if ( !CALL_HTTP_STATUS_OK )
@@ -45,7 +54,7 @@ int sendreqs()
 //            return ERR_REMOTE_CALL_STATUS;
 //        }
 
-        DBG("Remote call OK");
+        DBG("Remote call OK\n");
     }
 
     AUS.elapsed = lib_elapsed(&start);

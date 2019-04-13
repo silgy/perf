@@ -146,6 +146,8 @@ function sendbatch(url, times, i, batches)
         }
     };
 
-    x.open("GET", "sendreqs?url="+url+"&times="+times, true);
+//    p("Sending batch #"+i+"...");
+    x.open("GET", "sendreqs?batch="+i+"&url="+url+"&times="+times, true);
     x.send();
+//    p("Batch #"+i+" sent");
 }
