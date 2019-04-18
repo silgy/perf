@@ -153,6 +153,8 @@ char *silgy_message(int code)
 -------------------------------------------------------------------------- */
 char *silgy_message_lang(int ci, int code)
 {
+#ifndef SILGY_WATCHER
+
     int i;
     for ( i=0; i<G_next_message; ++i )
         if ( G_messages[i].code == code && 0==strcmp(G_messages[i].lang, conn[ci].lang) )
@@ -161,6 +163,8 @@ char *silgy_message_lang(int ci, int code)
     /* fallback */
 
     return silgy_message(code);
+
+#endif  /* SILGY_WATCHER */
 }
 
 
@@ -5057,9 +5061,10 @@ void log_write_time(int level, const char *message, ...)
     vsprintf(buffer, message, plist);
     va_end(plist);
 
-    /* write to log file */
+    /* write to the log file */
 
-    fprintf(M_log_fd, "%s\n", buffer);
+    fprintf(M_log_fd, buffer);
+    fprintf(M_log_fd, "\n");
 
 #ifdef DUMP
     fflush(M_log_fd);
@@ -5090,9 +5095,10 @@ void log_write(int level, const char *message, ...)
     vsprintf(buffer, message, plist);
     va_end(plist);
 
-    /* write to log file */
+    /* write to the log file */
 
-    fprintf(M_log_fd, "%s\n", buffer);
+    fprintf(M_log_fd, buffer);
+    fprintf(M_log_fd, "\n");
 
 #ifdef DUMP
     fflush(M_log_fd);

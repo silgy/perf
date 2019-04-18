@@ -24,7 +24,7 @@
 /* read from the config file */
 int         G_httpPort=80;
 int         G_httpsPort=443;
-char        G_cipherList[256]="";
+char        G_cipherList[1024]="";
 char        G_certFile[256]="";
 char        G_certChainFile[256]="";
 char        G_keyFile[256]="";
@@ -1053,7 +1053,7 @@ static void set_state(int ci, long bytes)
     {
         if ( conn[ci].was_read < conn[ci].clen )
         {
-            DBG("Continue receiving");
+            DBG("ci=%d, was_read=%ld, continue receiving", ci, conn[ci].was_read);
         }
         else    /* data received */
         {
@@ -1542,14 +1542,17 @@ static bool init(int argc, char **argv)
     ALWAYS("-------");
     ALWAYS("              SILGYDIR = %s", G_appdir);
     ALWAYS("    WEB_SERVER_VERSION = %s", WEB_SERVER_VERSION);
+#ifdef MEM_TINY
+    ALWAYS("          Memory model = MEM_TINY");
+#endif
 #ifdef MEM_SMALL
     ALWAYS("          Memory model = MEM_SMALL");
 #endif
 #ifdef MEM_MEDIUM
     ALWAYS("          Memory model = MEM_MEDIUM");
 #endif
-#ifdef MEM_BIG
-    ALWAYS("          Memory model = MEM_BIG");
+#ifdef MEM_LARGE
+    ALWAYS("          Memory model = MEM_LARGE");
 #endif
 #ifdef MEM_HUGE
     ALWAYS("          Memory model = MEM_HUGE");
@@ -3087,11 +3090,19 @@ static void gen_response_header(int ci)
     M_pollfds[conn[ci].pi].events = POLLOUT;
 #endif
 
+#if OUT_HEADER_BUFSIZE-1 <= MAX_LOG_STR_LEN
 #ifdef SEND_ALL_AT_ONCE
     DBG("\nResponse header:\n\n[%s]\n", out_header);
 #else
     DBG("\nResponse header:\n\n[%s]\n", conn[ci].out_header);
 #endif
+#else
+#ifdef SEND_ALL_AT_ONCE
+    log_long(out_header, conn[ci].out_hlen, "\nResponse header");
+#else
+    log_long(conn[ci].out_header, conn[ci].out_hlen, "\nResponse header");
+#endif
+#endif  /* OUT_HEADER_BUFSIZE-1 <= MAX_LOG_STR_LEN */
 
 #ifdef SEND_ALL_AT_ONCE
     /* ----------------------------------------------------------------- */
@@ -3427,12 +3438,11 @@ static int parse_req(int ci, long len)
 
     hlen = p_hend - conn[ci].in;    /* HTTP header length including first of the last new line characters to simplify parsing algorithm in the third 'for' loop below */
 
-    /* temporarily insert EOS at the end of header to avoid logging POST data */
+#ifdef DUMP
+    DBG("hlen = %d", hlen);
+#endif
 
-    char eoh = conn[ci].in[hlen];
-    conn[ci].in[hlen] = EOS;
-    DBG("Incoming buffer:\n\n[%s]\n", conn[ci].in);
-    conn[ci].in[hlen] = eoh;
+    log_long(conn[ci].in, hlen, "Incoming buffer");     /* IN_BUFSIZE > MAX_LOG_STR_LEN! */
 
     ++hlen;     /* HTTP header length including first of the last new line characters to simplify parsing algorithm in the third 'for' loop below */
 
@@ -3526,7 +3536,7 @@ static int parse_req(int ci, long len)
 #endif
         strcpy(conn[ci].uri, tmp);
     }
-#endif
+#endif  /* APP_ROOT_URI */
 
     /* only for low-level tests ------------------------------------- */
 #ifdef DUMP
@@ -3569,13 +3579,13 @@ static int parse_req(int ci, long len)
             if ( now_value )
             {
                 value[j] = EOS;
+                now_value = FALSE;
                 if ( j == 0 )
                     WAR("Value of %s is empty!", label);
                 else
                     if ( (ret=set_http_req_val(ci, label, value+1)) != 200 ) return ret;
             }
             now_label = TRUE;
-            now_value = FALSE;
             j = 0;
         }
         else if ( now_label && conn[ci].in[i] == ':' )  /* end of label, start of value */
@@ -3599,6 +3609,7 @@ static int parse_req(int ci, long len)
         else if ( now_value )   /* value */
         {
             value[j++] = conn[ci].in[i];
+
             if ( j == MAX_VALUE_LEN )   /* truncate here */
             {
                 WAR("Truncating %s's value", label);
@@ -3779,7 +3790,7 @@ static int parse_req(int ci, long len)
 
         if ( len < conn[ci].clen )      /* the whole content not received yet */
         {                               /* this is the only case when conn_state != received */
-            DBG("The whole content not received yet");
+            DBG("The whole content not received yet, len=%d", len);
 #ifdef DUMP
             DBG("Changing state to CONN_STATE_READING_DATA");
 #endif
@@ -4179,8 +4190,15 @@ static bool init_ssl()
        https://hynek.me/articles/hardening-your-web-servers-ssl-ciphers
        https://www.ssllabs.com/ssltest
        Last update: 2019-04-08
+       Qualys says Forward Secrecy isn't enabled
     */
-    char ciphers[256]="ECDH+AESGCM:ECDH+CHACHA20:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:RSA+AESGCM:RSA+AES:!aNULL:!MD5:!DSS";
+//    char ciphers[1024]="ECDH+AESGCM:ECDH+CHACHA20:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:RSA+AESGCM:RSA+AES:!aNULL:!MD5:!DSS";
+
+    /*
+       https://www.digicert.com/ssl-support/ssl-enabling-perfect-forward-secrecy.htm
+       Last update: 2019-04-18
+    */
+    char ciphers[1024]="EECDH+ECDSA+AESGCM EECDH+aRSA+AESGCM EECDH+ECDSA+SHA384 EECDH+ECDSA+SHA256 EECDH+aRSA+SHA384 EECDH+aRSA+SHA256 EECDH+aRSA+RC4 EECDH EDH+aRSA RC4 !aNULL !eNULL !LOW !3DES !MD5 !EXP !PSK !SRP !DSS !RC4";
 
     DBG("init_ssl");
 
@@ -4204,16 +4222,16 @@ static bool init_ssl()
         return FALSE;
     }
 
-    /* support ECDH using the most appropriate shared curve */
-
-//  if ( SSL_CTX_set_ecdh_auto(M_ssl_ctx, 1) <= 0 )     /* undefined reference?? */
-/*  {
-        ERR("SSL_CTX_set_ecdh_auto failed");
-        return FALSE;
-    } */
-
     const long flags = SSL_OP_ALL | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1;
     SSL_CTX_set_options(M_ssl_ctx, flags);
+
+    /* support ECDH using the most appropriate shared curve */
+
+    if ( SSL_CTX_set_ecdh_auto(M_ssl_ctx, 1) <= 0 )
+    {
+        ERR("SSL_CTX_set_ecdh_auto failed");
+        return FALSE;
+    }
 
     if ( G_cipherList[0] )
         strcpy(ciphers, G_cipherList);
@@ -4806,12 +4824,12 @@ void eng_send_msg_description(int ci, int code)
 #ifdef MSG_FORMAT_JSON
     OUT("{\"code\":%d,\"category\":\"%s\",\"message\":\"%s\"}", code, cat, msg);
     conn[ci].ctype = RES_JSON;
-    RES_KEEP_CONTENT;
 #else
     OUT("%d|%s|%s", code, cat, msg);
     conn[ci].ctype = RES_TEXT;
-    RES_KEEP_CONTENT;
 #endif
+
+    RES_KEEP_CONTENT;
 
     DBG("eng_send_msg_description: [%s]", G_tmp);
 
