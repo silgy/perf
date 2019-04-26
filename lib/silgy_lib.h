@@ -126,11 +126,18 @@ typedef struct {
 #ifdef APP_JSON_MAX_LEVELS
 #define JSON_MAX_LEVELS         APP_JSON_MAX_LEVELS
 #else
+#ifdef MEM_TINY
+#define JSON_MAX_LEVELS         2
+#else
 #define JSON_MAX_LEVELS         4
 #endif
+#endif  /* APP_JSON_MAX_LEVELS */
 
-#define JSON_MAX_JSONS          1000    /* size of the array used for auto-initializing JSON variables */
+#ifdef MEM_TINY
+#define JSON_POOL_SIZE          100     /* for storing sub-JSONs */
+#else
 #define JSON_POOL_SIZE          1000    /* for storing sub-JSONs */
+#endif
 
 
 /* single JSON element */
@@ -262,6 +269,7 @@ extern "C" {
     void silgy_add_message(int code, const char *lang, const char *message, ...);
     char *silgy_message(int code);
     char *silgy_message_lang(int ci, int code);
+    char *urlencode(const char *src);
     bool lib_open_db(void);
     void lib_close_db(void);
     bool lib_file_exists(const char *fname);

@@ -73,11 +73,6 @@ static void *M_rest_ssl=NULL;    /* dummy */
 static unsigned char M_random_numbers[RANDOM_NUMBERS];
 static char M_random_initialized=0;
 
-#ifdef AUTO_INIT_EXPERIMENT
-static void *M_jsons[JSON_MAX_JSONS];   /* array of pointers for auto-init */
-static int M_jsons_cnt=0;
-#endif  /* AUTO_INIT_EXPERIMENT */
-
 static void seed_rand(void);
 static void minify_1(char *dest, const char *src);
 static int minify_2(char *dest, const char *src);
@@ -165,6 +160,35 @@ char *silgy_message_lang(int ci, int code)
     return silgy_message(code);
 
 #endif  /* SILGY_WATCHER */
+}
+
+
+/* --------------------------------------------------------------------------
+   URI encoding
+---------------------------------------------------------------------------*/
+char *urlencode(const char *src)
+{
+static char     dest[4096];
+    int         i, j=0;
+    const char  *hex="0123456789ABCDEF";
+
+    for ( i=0; src[i] && j<4092; ++i )
+    {
+        if ( isalnum(src[i]) )
+        {
+            dest[j++] = src[i];
+        }
+        else
+        {
+            dest[j++] = '%';
+            dest[j++] = hex[src[i] >> 4];
+            dest[j++] = hex[src[i] & 15];
+        }
+    }
+
+    dest[j] = EOS;
+
+    return dest;
 }
 
 
@@ -1890,10 +1914,10 @@ struct rusage usage;
 ---------------------------------------------------------------------------*/
 char *silgy_filter_strict(const char *src)
 {
-static char dst[1024];
+static char dst[4096];
     int     i=0, j=0;
 
-    while ( src[i] && j<1023 )
+    while ( src[i] && j<4095 )
     {
         if ( (src[i] >= 65 && src[i] <= 90)
                 || (src[i] >= 97 && src[i] <= 122)
@@ -1916,7 +1940,7 @@ static char dst[1024];
 -------------------------------------------------------------------------- */
 char *lib_add_spaces(const char *src, int len)
 {
-static char ret[1024];
+static char ret[4096];
     int     src_len;
     int     spaces;
     int     i;
@@ -1943,7 +1967,7 @@ static char ret[1024];
 -------------------------------------------------------------------------- */
 char *lib_add_lspaces(const char *src, int len)
 {
-static char ret[1024];
+static char ret[4096];
     int     src_len;
     int     spaces;
     int     i;
@@ -2740,10 +2764,10 @@ static char dst[MAX_LONG_URI_VAL_LEN+1];
 ---------------------------------------------------------------------------*/
 char *uri_encode(const char *str)
 {
-static char uri_encode[1024];
+static char uri_encode[4096];
     int     i;
 
-    for ( i=0; str[i] && i<1023; ++i )
+    for ( i=0; str[i] && i<4095; ++i )
     {
         if ( str[i] == ' ' )
             uri_encode[i] = '+';
@@ -2762,10 +2786,10 @@ static char uri_encode[1024];
 ---------------------------------------------------------------------------*/
 char *upper(const char *str)
 {
-static char upper[1024];
+static char upper[4096];
     int     i;
 
-    for ( i=0; str[i] && i<1023; ++i )
+    for ( i=0; str[i] && i<4095; ++i )
     {
         if ( str[i] >= 97 && str[i] <= 122 )
             upper[i] = str[i] - 32;
@@ -3295,7 +3319,7 @@ static char *json_indent(int level)
 {
 #define JSON_PRETTY_INDENT "    "
 
-static char dst[256];
+static char dst[4096];
     int     i;
 
     dst[0] = EOS;
@@ -3867,8 +3891,8 @@ bool lib_json_add(JSON *json, const char *name, const char *str_value, long int_
 
     if ( type == JSON_STRING )
     {
-        strncpy(json->rec[i].value, str_value, 255);
-        json->rec[i].value[255] = EOS;
+        strncpy(json->rec[i].value, str_value, JSON_VAL_LEN);
+        json->rec[i].value[JSON_VAL_LEN] = EOS;
     }
     else if ( type == JSON_BOOL )
     {
@@ -3945,7 +3969,7 @@ bool lib_json_add_record(JSON *json, const char *name, JSON *json_sub, bool is_a
 -------------------------------------------------------------------------- */
 char *lib_json_get_str(JSON *json, const char *name, int i)
 {
-static char dst[256];
+static char dst[JSON_VAL_LEN+1];
 
     if ( !name )    /* array elem */
     {

@@ -165,9 +165,13 @@ typedef char str64k[1024*64];
 #ifndef MEM_TINY
 #ifndef MEM_MEDIUM
 #ifndef MEM_LARGE
-#ifndef MEM_HUGE
+#ifndef MEM_XLARGE
+#ifndef MEM_XXLARGE
+#ifndef MEM_XXXLARGE
 #ifndef MEM_SMALL
 #define MEM_SMALL   /* default memory model */
+#endif
+#endif
 #endif
 #endif
 #endif
@@ -295,7 +299,7 @@ typedef char str64k[1024*64];
 #define IN_BUFSIZE                      4096            /* incoming request buffer length (4 kB) */
 #define OUT_BUFSIZE                     65536           /* initial HTTP response buffer length (64 kB) */
 #define MAX_CONNECTIONS                 10              /* max TCP connections */
-#define MAX_SESSIONS                    10              /* max user sessions */
+#define MAX_SESSIONS                    5               /* max user sessions */
 #elif defined MEM_MEDIUM
 #define IN_BUFSIZE                      8192            /* incoming request buffer length (8 kB) */
 #define OUT_BUFSIZE                     262144          /* initial HTTP response buffer length (256 kB) */
@@ -306,11 +310,21 @@ typedef char str64k[1024*64];
 #define OUT_BUFSIZE                     262144          /* initial HTTP response buffer length (256 kB) */
 #define MAX_CONNECTIONS                 1000            /* max TCP connections */
 #define MAX_SESSIONS                    500             /* max user sessions */
-#elif defined MEM_HUGE
+#elif defined MEM_XLARGE
 #define IN_BUFSIZE                      8192            /* incoming request buffer length (8 kB) */
 #define OUT_BUFSIZE                     262144          /* initial HTTP response buffer length (256 kB) */
 #define MAX_CONNECTIONS                 5000            /* max TCP connections */
 #define MAX_SESSIONS                    2500            /* max user sessions */
+#elif defined MEM_XXLARGE
+#define IN_BUFSIZE                      8192            /* incoming request buffer length (8 kB) */
+#define OUT_BUFSIZE                     262144          /* initial HTTP response buffer length (256 kB) */
+#define MAX_CONNECTIONS                 10000           /* max TCP connections */
+#define MAX_SESSIONS                    5000            /* max user sessions */
+#elif defined MEM_XXXLARGE
+#define IN_BUFSIZE                      8192            /* incoming request buffer length (8 kB) */
+#define OUT_BUFSIZE                     262144          /* initial HTTP response buffer length (256 kB) */
+#define MAX_CONNECTIONS                 20000           /* max TCP connections */
+#define MAX_SESSIONS                    10000           /* max user sessions */
 #else   /* MEM_SMALL -- default */
 #define IN_BUFSIZE                      8192            /* incoming request buffer length (8 kB) */
 #define OUT_BUFSIZE                     131072          /* initial HTTP response buffer length (128 kB) */
@@ -790,16 +804,16 @@ typedef struct {
 /* counters */
 
 typedef struct {
-    long    req;        /* all parsed requests */
-    long    req_dsk;    /* all requests with desktop UA */
-    long    req_mob;    /* all requests with mobile UA */
-    long    req_bot;    /* all requests with HTTP header indicating well-known search-engine bots */
-    long    visits;     /* all visits to domain (Host=APP_DOMAIN) landing page (no action/resource), excl. bots that got 200 */
-    long    visits_dsk; /* like visits -- desktop only */
-    long    visits_mob; /* like visits -- mobile only */
-    long    blocked;    /* attempts from blocked IP */
-    double  elapsed;    /* sum of elapsed time of all requests for calculating average */
-    double  average;    /* average request elapsed */
+    long    req;            /* all parsed requests */
+    long    req_dsk;        /* all requests with desktop UA */
+    long    req_mob;        /* all requests with mobile UA */
+    long    req_bot;        /* all requests with HTTP header indicating well-known search-engine bots */
+    long    visits;         /* all visits to domain (Host=APP_DOMAIN) landing page (no action/resource), excl. bots that got 200 */
+    long    visits_dsk;     /* like visits -- desktop only */
+    long    visits_mob;     /* like visits -- mobile only */
+    long    blocked;        /* attempts from blocked IP */
+    double  elapsed;        /* sum of elapsed time of all requests for calculating average */
+    double  average;        /* average request elapsed */
 } counters_t;
 
 
