@@ -73,13 +73,8 @@ static void *M_rest_ssl=NULL;    /* dummy */
 static unsigned char M_random_numbers[RANDOM_NUMBERS];
 static char M_random_initialized=0;
 
-#ifdef AUTO_INIT_EXPERIMENT
-static void *M_jsons[JSON_MAX_JSONS];   /* array of pointers for auto-init */
-static int M_jsons_cnt=0;
-#endif  /* AUTO_INIT_EXPERIMENT */
-
 static void seed_rand(void);
-static void minify_1(char *dest, const char *src);
+static void minify_1(char *dest, const char *src, int len);
 static int minify_2(char *dest, const char *src);
 static void get_byteorder32(void);
 static void get_byteorder64(void);
@@ -141,7 +136,7 @@ char *silgy_message(int code)
         if ( G_messages[i].code == code )
             return G_messages[i].message;
 
-    static char unknown[256];
+static char unknown[128];
     sprintf(unknown, "Unknown code: %d", code);
     return unknown;
 }
@@ -165,6 +160,35 @@ char *silgy_message_lang(int ci, int code)
     return silgy_message(code);
 
 #endif  /* SILGY_WATCHER */
+}
+
+
+/* --------------------------------------------------------------------------
+   URI encoding
+---------------------------------------------------------------------------*/
+char *urlencode(const char *src)
+{
+static char     dest[4096];
+    int         i, j=0;
+    const char  *hex="0123456789ABCDEF";
+
+    for ( i=0; src[i] && j<4092; ++i )
+    {
+        if ( isalnum(src[i]) )
+        {
+            dest[j++] = src[i];
+        }
+        else
+        {
+            dest[j++] = '%';
+            dest[j++] = hex[src[i] >> 4];
+            dest[j++] = hex[src[i] & 15];
+        }
+    }
+
+    dest[j] = EOS;
+
+    return dest;
 }
 
 
@@ -1890,10 +1914,10 @@ struct rusage usage;
 ---------------------------------------------------------------------------*/
 char *silgy_filter_strict(const char *src)
 {
-static char dst[1024];
+static char dst[4096];
     int     i=0, j=0;
 
-    while ( src[i] && j<1023 )
+    while ( src[i] && j<4095 )
     {
         if ( (src[i] >= 65 && src[i] <= 90)
                 || (src[i] >= 97 && src[i] <= 122)
@@ -1916,7 +1940,7 @@ static char dst[1024];
 -------------------------------------------------------------------------- */
 char *lib_add_spaces(const char *src, int len)
 {
-static char ret[1024];
+static char ret[4096];
     int     src_len;
     int     spaces;
     int     i;
@@ -1943,7 +1967,7 @@ static char ret[1024];
 -------------------------------------------------------------------------- */
 char *lib_add_lspaces(const char *src, int len)
 {
-static char ret[1024];
+static char ret[4096];
     int     src_len;
     int     spaces;
     int     i;
@@ -2738,12 +2762,12 @@ static char dst[MAX_LONG_URI_VAL_LEN+1];
 /* --------------------------------------------------------------------------
    Primitive URI encoding
 ---------------------------------------------------------------------------*/
-char *uri_encode(const char *str)
+/*char *uri_encode(const char *str)
 {
-static char uri_encode[1024];
+static char uri_encode[4096];
     int     i;
 
-    for ( i=0; str[i] && i<1023; ++i )
+    for ( i=0; str[i] && i<4095; ++i )
     {
         if ( str[i] == ' ' )
             uri_encode[i] = '+';
@@ -2754,7 +2778,7 @@ static char uri_encode[1024];
     uri_encode[i] = EOS;
 
     return uri_encode;
-}
+}*/
 
 
 /* --------------------------------------------------------------------------
@@ -2762,10 +2786,10 @@ static char uri_encode[1024];
 ---------------------------------------------------------------------------*/
 char *upper(const char *str)
 {
-static char upper[1024];
+static char upper[4096];
     int     i;
 
-    for ( i=0; str[i] && i<1023; ++i )
+    for ( i=0; str[i] && i<4095; ++i )
     {
         if ( str[i] >= 97 && str[i] <= 122 )
             upper[i] = str[i] - 32;
@@ -2890,7 +2914,7 @@ static unsigned int seeds[SILGY_SEEDS_MEM];
     static int seeded=0;    /* 8 bits */
 
     unsigned int seed;
-    static unsigned int prev_seed=0;
+static unsigned int prev_seed=0;
 
     while ( 1 )
     {
@@ -3295,7 +3319,7 @@ static char *json_indent(int level)
 {
 #define JSON_PRETTY_INDENT "    "
 
-static char dst[256];
+static char dst[4096];
     int     i;
 
     dst[0] = EOS;
@@ -3867,8 +3891,8 @@ bool lib_json_add(JSON *json, const char *name, const char *str_value, long int_
 
     if ( type == JSON_STRING )
     {
-        strncpy(json->rec[i].value, str_value, 255);
-        json->rec[i].value[255] = EOS;
+        strncpy(json->rec[i].value, str_value, JSON_VAL_LEN);
+        json->rec[i].value[JSON_VAL_LEN] = EOS;
     }
     else if ( type == JSON_BOOL )
     {
@@ -3945,7 +3969,7 @@ bool lib_json_add_record(JSON *json, const char *name, JSON *json_sub, bool is_a
 -------------------------------------------------------------------------- */
 char *lib_json_get_str(JSON *json, const char *name, int i)
 {
-static char dst[256];
+static char dst[JSON_VAL_LEN+1];
 
     if ( !name )    /* array elem */
     {
@@ -4349,9 +4373,10 @@ bool silgy_email(const char *to, const char *subject, const char *message)
     }
     else
     {
-        fprintf(mailpipe, "To: %s\n", to);
         fprintf(mailpipe, "From: %s\n", sender);
-        fprintf(mailpipe, "Subject: %s\n\n", subject);
+        fprintf(mailpipe, "To: %s\n", to);
+        fprintf(mailpipe, "Subject: %s\n", subject);
+        fprintf(mailpipe, "Content-Type: text/plain; charset=\"utf-8\"\n\n");
         fwrite(message, 1, strlen(message), mailpipe);
         fwrite("\n.\n", 1, 3, mailpipe);
         pclose(mailpipe);
@@ -4377,27 +4402,37 @@ bool silgy_email(const char *to, const char *subject, const char *message)
 -------------------------------------------------------------------------- */
 int silgy_minify(char *dest, const char *src)
 {
-static char temp[4194304];
+    char *temp;
 
-    minify_1(temp, src);
-    return minify_2(dest, temp);
+    int len = strlen(src);
+
+    if ( !(temp=(char*)malloc(len+1)) )
+    {
+        ERR("Couldn't allocate %d bytes for silgy_minify", len);
+        return 0;
+    }
+
+    minify_1(temp, src, len);
+
+    int ret = minify_2(dest, temp);
+
+    free(temp);
+
+    return ret;
 }
 
 
 /* --------------------------------------------------------------------------
    First pass -- only remove comments
 -------------------------------------------------------------------------- */
-static void minify_1(char *dest, const char *src)
+static void minify_1(char *dest, const char *src, int len)
 {
-    int     len;
     int     i;
     int     j=0;
     bool    opensq=FALSE;       /* single quote */
     bool    opendq=FALSE;       /* double quote */
     bool    openco=FALSE;       /* comment */
     bool    opensc=FALSE;       /* star comment */
-
-    len = strlen(src);
 
     for ( i=0; i<len; ++i )
     {
@@ -4442,7 +4477,7 @@ static void minify_1(char *dest, const char *src)
 
 
 /* --------------------------------------------------------------------------
-   return new length
+   Return new length
 -------------------------------------------------------------------------- */
 static int minify_2(char *dest, const char *src)
 {
@@ -5512,7 +5547,7 @@ void MD5_Final(unsigned char *result, MD5_CTX *ctx)
 -------------------------------------------------------------------------- */
 char *md5(const char* str)
 {
-    static char result[33];
+static char result[33];
     unsigned char digest[16];
 
     MD5_CTX context;

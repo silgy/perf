@@ -105,18 +105,18 @@ static struct {
         {"-", EOS}
     };
 
-static char         *M_pidfile;                 /* pid file name */
+static char     *M_pidfile;                 /* pid file name */
 
 #ifdef _WIN32   /* Windows */
-static SOCKET       M_listening_fd=0;           /* The socket file descriptor for "listening" socket */
-static SOCKET       M_listening_sec_fd=0;       /* The socket file descriptor for secure "listening" socket */
+static SOCKET   M_listening_fd=0;           /* The socket file descriptor for "listening" socket */
+static SOCKET   M_listening_sec_fd=0;       /* The socket file descriptor for secure "listening" socket */
 #else
-static int          M_listening_fd=0;           /* The socket file descriptor for "listening" socket */
-static int          M_listening_sec_fd=0;       /* The socket file descriptor for secure "listening" socket */
+static int      M_listening_fd=0;           /* The socket file descriptor for "listening" socket */
+static int      M_listening_sec_fd=0;       /* The socket file descriptor for secure "listening" socket */
 #endif  /* _WIN32 */
 
 #ifdef HTTPS
-static SSL_CTX      *M_ssl_ctx;
+static SSL_CTX  *M_ssl_ctx;
 #endif
 
 #ifdef HTTPS
@@ -202,11 +202,11 @@ int main(int argc, char **argv)
 
 static struct   sockaddr_in serv_addr;      /* static = initialised to zeros */
 static struct   sockaddr_in cli_addr;       /* static = initialised to zeros */
-unsigned int    addr_len=0;
-unsigned long   hit=0;
+    unsigned int addr_len=0;
+    unsigned long hit=0;
     char        remote_addr[INET_ADDRSTRLEN]=""; /* remote address */
     int         reuse_addr=1;               /* Used so we can re-bind to our port while a previous connection is still in TIME_WAIT state */
-struct timeval  timeout;                    /* Timeout for select */
+    struct timeval timeout;                    /* Timeout for select */
     int         sockets_ready;              /* Number of sockets ready for I/O */
     int         i=0;                        /* Current item in conn_sockets for for loops */
     long        bytes=0;
@@ -1450,8 +1450,7 @@ static void close_conn(int ci)
 -------------------------------------------------------------------------- */
 static bool init(int argc, char **argv)
 {
-    time_t  sometimeahead;
-    int     i=0;
+    int i=0;
 
     /* init globals */
 
@@ -1574,8 +1573,14 @@ static bool init(int argc, char **argv)
 #ifdef MEM_LARGE
     ALWAYS("          Memory model = MEM_LARGE");
 #endif
-#ifdef MEM_HUGE
-    ALWAYS("          Memory model = MEM_HUGE");
+#ifdef MEM_XLARGE
+    ALWAYS("          Memory model = MEM_XLARGE");
+#endif
+#ifdef MEM_XXLARGE
+    ALWAYS("          Memory model = MEM_XXLARGE");
+#endif
+#ifdef MEM_XXXLARGE
+    ALWAYS("          Memory model = MEM_XXXLARGE");
 #endif
     ALWAYS("       MAX_CONNECTIONS = %d", MAX_CONNECTIONS);
     ALWAYS("          MAX_SESSIONS = %d", MAX_SESSIONS);
@@ -1757,7 +1762,7 @@ static bool init(int argc, char **argv)
 #endif  /* _WIN32 */
     DBG("Now is: %s\n", G_last_modified);
 
-    sometimeahead = G_now + 3600*24*EXPIRES_IN_DAYS;
+    time_t sometimeahead = G_now + 3600*24*EXPIRES_IN_DAYS;
     G_ptm = gmtime(&sometimeahead);
 #ifdef _WIN32   /* Windows */
     strftime(M_expires, 32, "%a, %d %b %Y %H:%M:%S GMT", G_ptm);
@@ -3973,18 +3978,24 @@ static int set_http_req_val(int ci, const char *label, const char *value)
     }
     else if ( 0==strcmp(ulabel, "X-FORWARDED-FOR") )    /* keep first IP as client IP */
     {
+        /* it can be 'unknown' */
+
+        char tmp[INET_ADDRSTRLEN+1];
         len = strlen(value);
         i = 0;
 
         while ( i<len && (value[i]=='.' || isdigit(value[i])) && i<INET_ADDRSTRLEN )
         {
-            conn[ci].ip[i] = value[i];
+            tmp[i] = value[i];
             ++i;
         }
 
-        conn[ci].ip[i] = EOS;
+        tmp[i] = EOS;
 
-        DBG("%s's value: [%s]", label, conn[ci].ip);
+        DBG("%s's value: [%s]", label, tmp);
+
+        if ( strlen(tmp) > 6 )
+            strcpy(conn[ci].ip, tmp);
     }
     else if ( 0==strcmp(ulabel, "CONTENT-LENGTH") )
     {
