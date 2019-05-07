@@ -26,29 +26,20 @@
 #endif
 
 #ifndef MAX_ULA_BEFORE_FIRST_SLOW                               /* maximum unsuccessful login tries before slowing down to 1 per minute */
-#define MAX_ULA_BEFORE_FIRST_SLOW       5
+#define MAX_ULA_BEFORE_FIRST_SLOW       10
 #endif
 
 #ifndef MAX_ULA_BEFORE_SECOND_SLOW                              /* maximum unsuccessful login tries before slowing down to 1 per hour */
-#define MAX_ULA_BEFORE_SECOND_SLOW      10
+#define MAX_ULA_BEFORE_SECOND_SLOW      25
 #endif
 
 #ifndef MAX_ULA_BEFORE_THIRD_SLOW                               /* maximum unsuccessful login tries before slowing down to 1 per day */
-#define MAX_ULA_BEFORE_THIRD_SLOW       20
+#define MAX_ULA_BEFORE_THIRD_SLOW       100
 #endif
 
 #ifndef MAX_ULA_BEFORE_LOCK                                     /* maximum unsuccessful login tries before user lockout */
-#define MAX_ULA_BEFORE_LOCK             100
+#define MAX_ULA_BEFORE_LOCK             1000
 #endif
-
-
-/* user role */
-
-#define USER_ROLE_ANONYMOUS             0
-#define USER_ROLE_CUSTOMER              5
-#define USER_ROLE_USER                  10
-#define USER_ROLE_MODERATOR             20
-#define USER_ROLE_ADMIN                 30
 
 
 /* user status */
@@ -183,13 +174,6 @@
 #ifndef STR_005
 #define STR_005                         "uvwxy"
 #endif
-
-
-#define LOGGED                          US.logged
-#define CUSTOMER                        US.role==USER_ROLE_CUSTOMER
-#define MODERATOR                       US.role==USER_ROLE_MODERATOR
-#define ADMIN                           US.role==USER_ROLE_ADMIN
-#define UID                             US.uid
 
 
 #define SET_USER_STR(key, val)          silgy_usr_set_str(ci, key, val)
