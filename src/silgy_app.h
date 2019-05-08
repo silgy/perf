@@ -20,11 +20,9 @@
 
 #define MEM_MEDIUM
 #define SILGY_AS_BOT
-#define FD_MON_POLL
-//#define DUMP
 
-#define WAIT            "onClick=\"wait();\""
-#define ONKEYDOWN       "onkeydown=\"ent(event);\""
+#define WAIT                        "onClick=\"wait();\""
+#define ONKEYDOWN                   "onkeydown=\"ent(event);\""
 
 
 /* app user session */

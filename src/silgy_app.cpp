@@ -48,9 +48,6 @@ void gen_header(int ci)
 void gen_footer(int ci)
 {
     OUT("<div id=\"wait\" class=wt></div>");
-    OUT("<script>");
-    APPEND_CSS("https://fonts.googleapis.com/css?family=Roboto", TRUE);
-    OUT("</script>");
     OUT("</body></html>");
 }
 
