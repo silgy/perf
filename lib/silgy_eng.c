@@ -5718,8 +5718,6 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
     MYSQL_ROW   sql_row;
     long        sql_records;
 
-    if ( rows < 1 ) rows = 10;
-
     char ai_sql[SQLBUF]="";
 
     if ( ai && ai_cnt )
@@ -5782,9 +5780,9 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
     OUT("<tr>");
 
     if ( REQ_DSK )
-        OUT("<th>id</th><th>email</th><th>name</th><th>created</th><th>last_login</th><th>visits</th>%s", ai_th);
+        OUT("<th>id</th><th>login</th><th>email</th><th>name</th><th>created</th><th>last_login</th><th>visits</th>%s", ai_th);
     else
-        OUT("<th>email</th><th>last_login</th><th>visits</th>%s", ai_th);
+        OUT("<th>id</th><th>login</th><th>email</th><th>last_login</th><th>visits</th>%s", ai_th);
 
     OUT("</tr>");
 
@@ -5858,9 +5856,9 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
         }
 
         if ( REQ_DSK )
-            OUT("<td class=r>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=r>%s</td>%s", fmt0, sql_row[2], sql_row[3], sql_row[5], sql_row[6], fmt7, ai_td);
+            OUT("<td class=r>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=r>%s</td>%s", fmt0, sql_row[1], sql_row[2], sql_row[3], sql_row[5], sql_row[6], fmt7, ai_td);
         else
-            OUT("<td>%s</td><td>%s</td><td class=r>%s</td>%s", sql_row[2], sql_row[6], fmt7, ai_td);
+            OUT("<td class=r>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=r>%s</td>%s", fmt0, sql_row[1], sql_row[2], sql_row[6], fmt7, ai_td);
 
         OUT("</tr>");
     }
@@ -5876,9 +5874,10 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
 /* --------------------------------------------------------------------------
    Admin dashboard
 -------------------------------------------------------------------------- */
-void silgy_admin_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
+void silgy_admin_info(int ci, int users, admin_info_t ai[], int ai_cnt, bool header_n_footer)
 {
-    OUT_HTML_HEADER;
+    if ( header_n_footer )
+        OUT_HTML_HEADER;
 
     /* ------------------------------------------------------------------- */
     /* Style */
@@ -5896,7 +5895,8 @@ void silgy_admin_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
         ERR("Not an admin");
         OUT("<p>Not an admin</p>");
         RES_STATUS(403);
-        OUT_HTML_FOOTER;
+        if ( header_n_footer )
+            OUT_HTML_FOOTER;
         RES_DONT_CACHE;
         return;
     }
@@ -5996,10 +5996,12 @@ void silgy_admin_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
     /* ------------------------------------------------------------------- */
     /* Users */
 #ifdef USERS
-    users_info(ci, rows, ai, ai_cnt);
+    if ( users > 0 )
+        users_info(ci, users, ai, ai_cnt);
 #endif
 
-    OUT_HTML_FOOTER;
+    if ( header_n_footer )
+        OUT_HTML_FOOTER;
 
     RES_DONT_CACHE;
 }
