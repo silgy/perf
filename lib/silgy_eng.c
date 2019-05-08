@@ -140,8 +140,9 @@ static int          M_poll_ci[MAX_CONNECTIONS+LISTENING_FDS]={0};
 #endif  /* FD_MON_POLL */
 
 static stat_res_t   M_stat[MAX_STATICS];        /* static resources */
-static char         M_resp_date[32];            /* response header field Date */
-static char         M_expires[32];              /* response header field one month ahead for static resources */
+static char         M_resp_date[32];            /* response header Date */
+static char         M_expires_stat[32];         /* response header for static resources */
+static char         M_expires_gen[32];          /* response header for generated resources */
 static int          M_max_static=-1;            /* highest static resource M_stat index */
 static bool         M_favicon_exists=FALSE;     /* special case statics */
 static bool         M_robots_exists=FALSE;      /* -''- */
@@ -172,9 +173,9 @@ static void accept_http();
 static void accept_https();
 static void read_blocked_ips(void);
 static bool ip_blocked(const char *addr);
-static int first_free_stat(void);
+static int  first_free_stat(void);
 static bool read_files(bool minify, bool first_scan, const char *path);
-static int is_static_res(int ci, const char *name);
+static int  is_static_res(int ci, const char *name);
 static void process_req(int ci);
 static void gen_response_header(int ci);
 static void print_content_type(int ci, char type);
@@ -183,8 +184,8 @@ static void close_old_conn(void);
 static void uses_close_timeouted(void);
 static void close_uses(int usi, int ci);
 static void reset_conn(int ci, char new_state);
-static int parse_req(int ci, int len);
-static int set_http_req_val(int ci, const char *label, const char *value);
+static int  parse_req(int ci, int len);
+static int  set_http_req_val(int ci, const char *label, const char *value);
 static bool check_block_ip(int ci, const char *rule, const char *value);
 static char *get_http_descr(int status_code);
 static void dump_counters(void);
@@ -202,11 +203,11 @@ int main(int argc, char **argv)
 
 static struct   sockaddr_in serv_addr;      /* static = initialised to zeros */
 static struct   sockaddr_in cli_addr;       /* static = initialised to zeros */
-unsigned int    addr_len=0;
-unsigned long   hit=0;
+    unsigned int addr_len=0;
+    unsigned long hit=0;
     char        remote_addr[INET_ADDRSTRLEN]=""; /* remote address */
     int         reuse_addr=1;               /* Used so we can re-bind to our port while a previous connection is still in TIME_WAIT state */
-struct timeval  timeout;                    /* Timeout for select */
+    struct timeval timeout;                    /* Timeout for select */
     int         sockets_ready;              /* Number of sockets ready for I/O */
     int         i=0;                        /* Current item in conn_sockets for for loops */
     long        bytes=0;
@@ -933,6 +934,35 @@ struct timeval  timeout;                    /* Timeout for select */
 
 
 /* --------------------------------------------------------------------------
+   Set values for Expires response headers
+-------------------------------------------------------------------------- */
+static void set_expiry_dates()
+{
+    time_t sometimeahead;
+
+    sometimeahead = G_now + 3600*24*EXPIRES_STATICS;
+    G_ptm = gmtime(&sometimeahead);
+#ifdef _WIN32   /* Windows */
+    strftime(M_expires_stat, 32, "%a, %d %b %Y %H:%M:%S GMT", G_ptm);
+#else
+    strftime(M_expires_stat, 32, "%a, %d %b %Y %T GMT", G_ptm);
+#endif  /* _WIN32 */
+    DBG("New M_expires_stat: %s", M_expires_stat);
+
+    sometimeahead = G_now + 3600*24*EXPIRES_GENERATED;
+    G_ptm = gmtime(&sometimeahead);
+#ifdef _WIN32   /* Windows */
+    strftime(M_expires_gen, 32, "%a, %d %b %Y %H:%M:%S GMT", G_ptm);
+#else
+    strftime(M_expires_gen, 32, "%a, %d %b %Y %T GMT", G_ptm);
+#endif  /* _WIN32 */
+    DBG("New M_expires_gen: %s", M_expires_gen);
+
+    G_ptm = gmtime(&G_now);   /* reset to today */
+}
+
+
+/* --------------------------------------------------------------------------
    Close expired sessions etc...
 -------------------------------------------------------------------------- */
 static bool housekeeping()
@@ -991,17 +1021,7 @@ static bool housekeeping()
                 return FALSE;
             }
 
-            /* set new Expires date */
-            time_t sometimeahead;
-            sometimeahead = G_now + 3600*24*EXPIRES_IN_DAYS;
-            G_ptm = gmtime(&sometimeahead);
-#ifdef _WIN32   /* Windows */
-            strftime(M_expires, 32, "%a, %d %b %Y %H:%M:%S GMT", G_ptm);
-#else
-            strftime(M_expires, 32, "%a, %d %b %Y %T GMT", G_ptm);
-#endif  /* _WIN32 */
-            ALWAYS("New M_expires: %s", M_expires);
-            G_ptm = gmtime(&G_now);  /* make sure G_ptm is up to date */
+            set_expiry_dates();
 
             if ( G_blockedIPList[0] )
             {
@@ -1450,8 +1470,7 @@ static void close_conn(int ci)
 -------------------------------------------------------------------------- */
 static bool init(int argc, char **argv)
 {
-    time_t  sometimeahead;
-    int     i=0;
+    int i=0;
 
     /* init globals */
 
@@ -1763,18 +1782,9 @@ static bool init(int argc, char **argv)
 #endif  /* _WIN32 */
     DBG("Now is: %s\n", G_last_modified);
 
-    sometimeahead = G_now + 3600*24*EXPIRES_IN_DAYS;
-    G_ptm = gmtime(&sometimeahead);
-#ifdef _WIN32   /* Windows */
-    strftime(M_expires, 32, "%a, %d %b %Y %H:%M:%S GMT", G_ptm);
-#else
-    strftime(M_expires, 32, "%a, %d %b %Y %T GMT", G_ptm);
-#endif  /* _WIN32 */
-    DBG("M_expires: %s\n", M_expires);
+    set_expiry_dates();
 
-    G_ptm = gmtime(&G_now);  /* reset to today */
-
-	/* handle signals ---------------------------------------------------- */
+    /* handle signals ---------------------------------------------------- */
 
     signal(SIGINT,  sigdisp);   /* Ctrl-C */
     signal(SIGTERM, sigdisp);
@@ -2002,7 +2012,7 @@ static void accept_http()
 {
     int         i;
     int         connection;
-static struct   sockaddr_in cli_addr;   /* static = initialised to zeros */
+    struct sockaddr_in cli_addr;
     socklen_t   addr_len;
     char        remote_addr[INET_ADDRSTRLEN]="";
 
@@ -2102,7 +2112,7 @@ static void accept_https()
 #ifdef HTTPS
     int         i;
     int         connection;
-static struct   sockaddr_in cli_addr;   /* static = initialised to zeros */
+    struct sockaddr_in cli_addr;
     socklen_t   addr_len;
     char        remote_addr[INET_ADDRSTRLEN]="";
     int         ret, ssl_err;
@@ -2968,10 +2978,11 @@ static void gen_response_header(int ci)
 
         conn[ci].clen = 0;
     }
-    else if ( conn[ci].status == 304 )      /* not modified since */
+    else if ( conn[ci].status == 304 )   /* not modified since */
     {
-//        DBG("Not Modified");
-
+#ifdef DUMP
+        DBG("Not Modified");
+#endif
         if ( conn[ci].static_res == NOT_STATIC )
         {
             PRINT_HTTP_LAST_MODIFIED(G_last_modified);
@@ -2985,9 +2996,10 @@ static void gen_response_header(int ci)
     }
     else    /* normal response with content: 2xx, 4xx, 5xx */
     {
-//        DBG("Normal response");
-
-        if ( conn[ci].dont_cache )  /* dynamic content */
+#ifdef DUMP
+        DBG("Normal response");
+#endif
+        if ( conn[ci].dont_cache )   /* dynamic content */
         {
             PRINT_HTTP_VARY_DYN;
             PRINT_HTTP_NO_CACHE;
@@ -2996,18 +3008,20 @@ static void gen_response_header(int ci)
         {
             PRINT_HTTP_VARY_STAT;
 
-            if ( conn[ci].static_res == NOT_STATIC )
+            if ( conn[ci].static_res == NOT_STATIC )   /* generated -- moderate caching */
             {
                 if ( conn[ci].modified )
                     PRINT_HTTP_LAST_MODIFIED(time_epoch2http(conn[ci].modified));
                 else
                     PRINT_HTTP_LAST_MODIFIED(G_last_modified);
 
-                PRINT_HTTP_EXPIRES;
+                PRINT_HTTP_EXPIRES_GENERATED;
             }
-            else    /* static res */
+            else    /* static resource -- aggressive caching */
             {
                 PRINT_HTTP_LAST_MODIFIED(time_epoch2http(M_stat[conn[ci].static_res].modified));
+                PRINT_HTTP_CACHE_PUBLIC;
+                PRINT_HTTP_EXPIRES_STATICS;
             }
         }
 
@@ -3979,18 +3993,24 @@ static int set_http_req_val(int ci, const char *label, const char *value)
     }
     else if ( 0==strcmp(ulabel, "X-FORWARDED-FOR") )    /* keep first IP as client IP */
     {
+        /* it can be 'unknown' */
+
+        char tmp[INET_ADDRSTRLEN+1];
         len = strlen(value);
         i = 0;
 
         while ( i<len && (value[i]=='.' || isdigit(value[i])) && i<INET_ADDRSTRLEN )
         {
-            conn[ci].ip[i] = value[i];
+            tmp[i] = value[i];
             ++i;
         }
 
-        conn[ci].ip[i] = EOS;
+        tmp[i] = EOS;
 
-        DBG("%s's value: [%s]", label, conn[ci].ip);
+        DBG("%s's value: [%s]", label, tmp);
+
+        if ( strlen(tmp) > 6 )
+            strcpy(conn[ci].ip, tmp);
     }
     else if ( 0==strcmp(ulabel, "CONTENT-LENGTH") )
     {
@@ -4759,10 +4779,10 @@ void eng_out_html_header(int ci)
     OUT("<head>");
     OUT("<title>%s</title>", APP_WEBSITE);
 #ifdef APP_DESCRIPTION
-	OUT("<meta name=\"description\" content=\"%s\">", APP_DESCRIPTION);
+    OUT("<meta name=\"description\" content=\"%s\">", APP_DESCRIPTION);
 #endif
 #ifdef APP_KEYWORDS
-	OUT("<meta name=\"keywords\" content=\"%s\">", APP_KEYWORDS);
+    OUT("<meta name=\"keywords\" content=\"%s\">", APP_KEYWORDS);
 #endif
     if ( REQ_MOB )  // if mobile request
         OUT("<meta name=\"viewport\" content=\"width=device-width\">");
@@ -5615,8 +5635,379 @@ void eng_rest_header_pass(int ci, const char *key)
 }
 
 
+/* --------------------------------------------------------------------------
+   Blacklist IP
+-------------------------------------------------------------------------- */
+static void do_add2blocked(int ci)
+{
+    QSVAL   ip;
+    char    comm[1024];
+
+    INF("do_add2blocked");
+
+    OUT_HTML_HEADER;
+
+    if ( G_blacklist_cnt > MAX_BLACKLIST-1 )
+    {
+        WAR("G_blacklist_cnt at max (%d)!", MAX_BLACKLIST);
+        OUT("<p class=m50>ERROR: Blacklist already full!</p>");
+    }
+    else    /* some rudimentary validation */
+    {
+        if ( !QS("ip", ip) )
+        {
+            ERR("ip expected in URI");
+            OUT("<p class=m50>ERROR: ip expected in URI!</p>");
+        }
+        else if ( strlen(ip) > INET_ADDRSTRLEN-1 )
+        {
+            ERR("ip too long");
+            OUT("<p class=m50>ERROR: ip too long!</p>");
+        }
+        else if ( strlen(ip) < 7 )
+        {
+            ERR("ip too short");
+            OUT("<p class=m50>ERROR: ip too short!</p>");
+        }
+        else if ( !isdigit(ip[0]) )
+        {
+            ERR("ip does not start with digit");
+            OUT("<p class=m50>ERROR: ip does not start with digit!</p>");
+        }
+        else
+        {
+            eng_block_ip(ip, FALSE);
+            WAR("IP %s manually blacklisted", ip);
+            OUT("<p class=m50>IP %s blacklisted.</p>", ip);
+        }
+    }
+
+    OUT("<p class=m15><a href=\"/\"><< Back to Main</a></p>");
+
+    OUT_HTML_FOOTER;
+
+    RES_DONT_CACHE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Format counters
+-------------------------------------------------------------------------- */
+static void format_counters(counters_fmt_t *s, counters_t *n)
+{
+    amt(s->req, n->req);
+    amt(s->req_dsk, n->req_dsk);
+    amt(s->req_mob, n->req_mob);
+    amt(s->req_bot, n->req_bot);
+    amt(s->visits, n->visits);
+    amt(s->visits_dsk, n->visits_dsk);
+    amt(s->visits_mob, n->visits_mob);
+    amt(s->blocked, n->blocked);
+    amtd(s->average, n->average);
+}
+
+
+/* --------------------------------------------------------------------------
+   Users info
+-------------------------------------------------------------------------- */
+static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
+{
+#ifdef DBMYSQL
+    char        sql_query[SQLBUF];
+    MYSQL_RES   *result;
+    MYSQL_ROW   sql_row;
+    long        sql_records;
+
+    if ( rows < 1 ) rows = 10;
+
+    char ai_sql[SQLBUF]="";
+
+    if ( ai && ai_cnt )
+    {
+        int i;
+        for ( i=0; i<ai_cnt; ++i )
+        {
+            strcat(ai_sql, ", (");
+            strcat(ai_sql, ai[i].sql);
+            strcat(ai_sql, ")");
+        }
+    }
+
+    sprintf(sql_query, "SELECT id, login, email, name, status, created, last_login, visits%s FROM users ORDER BY last_login DESC", ai_sql);
+
+    DBG("sql_query: %s", sql_query);
+
+    mysql_query(G_dbconn, sql_query);
+
+    result = mysql_store_result(G_dbconn);
+
+    if ( !result )
+    {
+        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        OUT("<p>Error %u: %s</p>", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        RES_STATUS(500);
+        return;
+    }
+
+    OUT("<h2>Users</h2>");
+
+    sql_records = mysql_num_rows(result);
+
+    DBG("admin: %ld record(s) found", sql_records);
+
+    int last_to_show = sql_records<rows?sql_records:rows;
+
+    char formatted1[64];
+    char formatted2[64];
+
+    amt(formatted1, sql_records);
+    amt(formatted2, last_to_show);
+    OUT("<p>%s users, showing %s of last seen</p>", formatted1, formatted2);
+
+    OUT("<table cellpadding=4 border=1>");
+
+    char ai_th[1024]="";
+
+    if ( ai && ai_cnt )
+    {
+        int i;
+        for ( i=0; i<ai_cnt; ++i )
+        {
+            strcat(ai_th, "<th>");
+            strcat(ai_th, ai[i].th);
+            strcat(ai_th, "</th>");
+        }
+    }
+
+    OUT("<tr>");
+
+    if ( REQ_DSK )
+        OUT("<th>id</th><th>email</th><th>name</th><th>created</th><th>last_login</th><th>visits</th>%s", ai_th);
+    else
+        OUT("<th>email</th><th>last_login</th><th>visits</th>%s", ai_th);
+
+    OUT("</tr>");
+
+//    long    id;                     /* sql_row[0] */
+//    char    login[LOGIN_LEN+1];     /* sql_row[1] */
+//    char    email[EMAIL_LEN+1];     /* sql_row[2] */
+//    char    name[UNAME_LEN+1];      /* sql_row[3] */
+//    short   status;                 /* sql_row[4] */
+//    char    created[32];            /* sql_row[5] */
+//    char    last_login[32];         /* sql_row[6] */
+//    long    visits;                 /* sql_row[7] */
+
+    char fmt0[64];  /* id */
+    char fmt7[64];  /* visits */
+
+    int  i;
+    char trstyle[16];
+
+    char ai_td[4096]="";
+    double ai_double;
+    char ai_fmt[64];
+
+    for ( i=0; i<last_to_show; ++i )
+    {
+        sql_row = mysql_fetch_row(result);
+
+        amt(fmt0, atol(sql_row[0]));    /* id */
+        amt(fmt7, atol(sql_row[7]));    /* visits */
+
+        if ( atoi(sql_row[4]) != USER_STATUS_ACTIVE )
+            strcpy(trstyle, " class=g");
+        else
+            trstyle[0] = EOS;
+
+        OUT("<tr%s>", trstyle);
+
+        if ( ai && ai_cnt )
+        {
+            ai_td[0] = EOS;
+
+            int j;
+            for ( j=0; j<ai_cnt; ++j )
+            {
+                if ( 0==strcmp(ai[j].type, "int") )
+                {
+                    strcat(ai_td, "<td class=r>");
+                    amt(ai_fmt, atoi(sql_row[j+8]));
+                    strcat(ai_td, ai_fmt);
+                }
+                else if ( 0==strcmp(ai[j].type, "long") )
+                {
+                    strcat(ai_td, "<td class=r>");
+                    amt(ai_fmt, atol(sql_row[j+8]));
+                    strcat(ai_td, ai_fmt);
+                }
+                else if ( 0==strcmp(ai[j].type, "float") || 0==strcmp(ai[j].type, "double") )
+                {
+                    strcat(ai_td, "<td class=r>");
+                    sscanf(sql_row[j+8], "%f", &ai_double);
+                    amtd(ai_fmt, ai_double);
+                    strcat(ai_td, ai_fmt);
+                }
+                else    /* string */
+                {
+                    strcat(ai_td, "<td>");
+                    strcat(ai_td, sql_row[j+8]);
+                }
+
+                strcat(ai_td, "</td>");
+            }
+        }
+
+        if ( REQ_DSK )
+            OUT("<td class=r>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=r>%s</td>%s", fmt0, sql_row[2], sql_row[3], sql_row[5], sql_row[6], fmt7, ai_td);
+        else
+            OUT("<td>%s</td><td>%s</td><td class=r>%s</td>%s", sql_row[2], sql_row[6], fmt7, ai_td);
+
+        OUT("</tr>");
+    }
+
+    OUT("</table>");
+
+    mysql_free_result(result);
+
+#endif  /* DBMYSQL */
+}
+
+
+/* --------------------------------------------------------------------------
+   Admin dashboard
+-------------------------------------------------------------------------- */
+void silgy_admin_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
+{
+    OUT_HTML_HEADER;
+
+    /* ------------------------------------------------------------------- */
+    /* Style */
+
+    OUT("<style>");
+    OUT("body{font-family:monospace;font-size:10pt;}");
+    OUT(".r{text-align:right;}");
+    OUT(".g{color:grey;}");
+    OUT("</style>");
+
+    OUT("<h1>Admin Info</h1>");
+
+    if ( !ADMIN )
+    {
+        ERR("Not an admin");
+        OUT("<p>Not an admin</p>");
+        RES_STATUS(403);
+        OUT_HTML_FOOTER;
+        RES_DONT_CACHE;
+        return;
+    }
+
+    OUT("<h2>Server</h2>");
+
+    /* ------------------------------------------------------------------- */
+    /* Server info */
+
+    char formatted[64];
+
+    amt(formatted, G_days_up);
+    OUT("<p>Server started on %s (%s day(s) up) Silgy %s</p>", G_last_modified, formatted, WEB_SERVER_VERSION);
+
+    OUT("<p>App version: %s</p>", APP_VERSION);
+
+    /* ------------------------------------------------------------------- */
+    /* Memory */
+
+    OUT("<h2>Memory</h2>");
+
+    long mem_used;
+    char mem_used_kb[64];
+    char mem_used_mb[64];
+    char mem_used_gb[64];
+
+    mem_used = lib_get_memory();
+
+    amt(mem_used_kb, mem_used);
+    amtd(mem_used_mb, (double)mem_used/1024);
+    amtd(mem_used_gb, (double)mem_used/1024/1024);
+
+    OUT("<p>HWM: %s kB (%s MB / %s GB)</p>", mem_used_kb, mem_used_mb, mem_used_gb);
+
+    OUT("<h2>Counters</h2>");
+
+    OUT("<p>%d open connection(s), HWM: %d</p>", G_open_conn, G_open_conn_hwm);
+
+    OUT("<p>%d user session(s), HWM: %d</p>", G_sessions, G_sessions_hwm);
+
+    /* ------------------------------------------------------------------- */
+    /* Counters */
+
+    counters_fmt_t t;       /* today */
+    counters_fmt_t y;       /* yesterday */
+    counters_fmt_t b;       /* the day before */
+
+    format_counters(&t, &G_cnts_today);
+    format_counters(&y, &G_cnts_yesterday);
+    if ( REQ_DSK )
+        format_counters(&b, &G_cnts_day_before);
+
+    OUT("<table cellpadding=4 border=1>");
+
+    if ( REQ_DSK )  /* desktop -- 3 days' stats */
+    {
+        OUT("<tr><th>counter</th><th colspan=3>the day before</th><th colspan=3>yesterday</th><th colspan=3>today</th></tr>");
+        OUT("<tr><td rowspan=2>all traffic (parsed requests)</td><td>all</td><td>dsk</td><td>mob</td><td>all</td><td>dsk</td><td>mob</td><td>all</td><td>dsk</td><td>mob</td></tr>");
+        OUT("<tr><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td></tr>", b.req, b.req_dsk, b.req_mob, y.req, y.req_dsk, y.req_mob, t.req, t.req_dsk, t.req_mob);
+        OUT("<tr><td>bots</td><td colspan=3 class=r>%s</td><td colspan=3 class=r>%s</td><td colspan=3 class=r>%s</td></tr>", b.req_bot, y.req_bot, t.req_bot);
+        OUT("<tr><td rowspan=2>visits</td><td>all</td><td>dsk</td><td>mob</td><td>all</td><td>dsk</td><td>mob</td><td>all</td><td>dsk</td><td>mob</td></tr>");
+        OUT("<tr><td class=r><b>%s</b></td><td class=r>%s</td><td class=r>%s</td><td class=r><b>%s</b></td><td class=r>%s</td><td class=r>%s</td><td class=r><b>%s</b></td><td class=r>%s</td><td class=r>%s</td></tr>", b.visits, b.visits_dsk, b.visits_mob, y.visits, y.visits_dsk, y.visits_mob, t.visits, t.visits_dsk, t.visits_mob);
+        OUT("<tr><td>attempts blocked</td><td colspan=3 class=r>%s</td><td colspan=3 class=r>%s</td><td colspan=3 class=r>%s</td></tr>", b.blocked, y.blocked, t.blocked);
+        OUT("<tr><td>average</td><td colspan=3 class=r>%s ms</td><td colspan=3 class=r>%s ms</td><td colspan=3 class=r>%s ms</td></tr>", b.average, y.average, t.average);
+    }
+    else    /* mobile -- 2 days' stats */
+    {
+        OUT("<tr><th>counter</th><th colspan=3>yesterday</th><th colspan=3>today</th></tr>");
+        OUT("<tr><td rowspan=2>all traffic (parsed requests)</td><td>all</td><td>dsk</td><td>mob</td><td>all</td><td>dsk</td><td>mob</td></tr>");
+        OUT("<tr><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td><td class=r>%s</td></tr>", y.req, y.req_dsk, y.req_mob, t.req, t.req_dsk, t.req_mob);
+        OUT("<tr><td>bots</td><td colspan=3 class=r>%s</td><td colspan=3 class=r>%s</td></tr>", y.req_bot, t.req_bot);
+        OUT("<tr><td rowspan=2>visits</td><td>all</td><td>dsk</td><td>mob</td><td>all</td><td>dsk</td><td>mob</td></tr>");
+        OUT("<tr><td class=r><b>%s</b></td><td class=r>%s</td><td class=r>%s</td><td class=r><b>%s</b></td><td class=r>%s</td><td class=r>%s</td></tr>", y.visits, y.visits_dsk, y.visits_mob, t.visits, t.visits_dsk, t.visits_mob);
+        OUT("<tr><td>attempts blocked</td><td colspan=3 class=r>%s</td><td colspan=3 class=r>%s</td></tr>", y.blocked, t.blocked);
+        OUT("<tr><td>average</td><td colspan=3 class=r>%s ms</td><td colspan=3 class=r>%s ms</td></tr>", y.average, t.average);
+    }
+
+    OUT("</table>");
+
+    /* ------------------------------------------------------------------- */
+    /* IP blacklist */
+
+    if ( G_blockedIPList[0] )
+    {
+        OUT("<h2>Blacklist</h2>");
+
+        amt(formatted, G_blacklist_cnt);
+        OUT("<p>%s blacklisted IPs</p>", formatted);
+//        OUT("<p><form action=\"add2blocked\" method=\"post\"><input type=\"text\" name=\"ip\"> <input type=\"submit\" onClick=\"wait();\" value=\"Block\"></form></p>");
+    }
+
+    /* ------------------------------------------------------------------- */
+    /* Logs */
+
+//    OUT("<p><a href=\"logs\">Logs</a></p>");
+
+    /* ------------------------------------------------------------------- */
+    /* Users */
+#ifdef USERS
+    users_info(ci, rows, ai, ai_cnt);
+#endif
+
+    OUT_HTML_FOOTER;
+
+    RES_DONT_CACHE;
+}
+
+
 
 #else   /* SILGY_SVC ====================================================================================== */
+
 
 
 char        G_service[SVC_NAME_LEN+1];
@@ -5633,6 +6024,7 @@ char        *G_res=NULL;
 conn_t      conn[MAX_CONNECTIONS+1]={0}; /* dummy */
 int         ci=0;
 usession_t  uses={0};                   /* user session */
+ausession_t auses={0};                  /* app user session */
 
 /* counters */
 
@@ -5741,24 +6133,24 @@ int main(int argc, char *argv[])
     sprintf(logprefix, "s_%d", G_pid);
 
     if ( !log_start(logprefix, G_test) )
-		return EXIT_FAILURE;
+        return EXIT_FAILURE;
 
     /* pid file ---------------------------------------------------------- */
 
     if ( !(M_pidfile=lib_create_pid_file(logprefix)) )
-		return EXIT_FAILURE;
+        return EXIT_FAILURE;
 
     /* fill the M_random_numbers up */
 
     init_random_numbers();
 
-	/* handle signals ---------------------------------------------------- */
+    /* handle signals ---------------------------------------------------- */
 
-	signal(SIGINT,  sigdisp);	/* Ctrl-C */
-	signal(SIGTERM, sigdisp);
+    signal(SIGINT,  sigdisp);   /* Ctrl-C */
+    signal(SIGTERM, sigdisp);
 #ifndef _WIN32
-	signal(SIGQUIT, sigdisp);	/* Ctrl-\ */
-	signal(SIGTSTP, sigdisp);	/* Ctrl-Z */
+    signal(SIGQUIT, sigdisp);   /* Ctrl-\ */
+    signal(SIGTSTP, sigdisp);   /* Ctrl-Z */
 
     signal(SIGPIPE, SIG_IGN);   /* ignore SIGPIPE */
 #endif
@@ -5812,35 +6204,35 @@ int main(int argc, char *argv[])
     }
 #endif
 
-	G_queue_req = mq_open(G_req_queue_name, O_RDONLY, NULL, NULL);
+    G_queue_req = mq_open(G_req_queue_name, O_RDONLY, NULL, NULL);
 
-	if ( G_queue_req < 0 )
-	{
-		ERR("mq_open for req failed, errno = %d (%s)", errno, strerror(errno));
-		clean_up();
-		return EXIT_FAILURE;
-	}
+    if ( G_queue_req < 0 )
+    {
+        ERR("mq_open for req failed, errno = %d (%s)", errno, strerror(errno));
+        clean_up();
+        return EXIT_FAILURE;
+    }
 
     INF("G_queue_req open OK");
 
-	G_queue_res = mq_open(G_res_queue_name, O_WRONLY, NULL, NULL);
+    G_queue_res = mq_open(G_res_queue_name, O_WRONLY, NULL, NULL);
 
-	if ( G_queue_res < 0 )
-	{
-		ERR("mq_open for res failed, errno = %d (%s)", errno, strerror(errno));
-		clean_up();
-		return EXIT_FAILURE;
-	}
+    if ( G_queue_res < 0 )
+    {
+        ERR("mq_open for res failed, errno = %d (%s)", errno, strerror(errno));
+        clean_up();
+        return EXIT_FAILURE;
+    }
 
     INF("G_queue_res open OK");
 
     /* ------------------------------------------------------------------- */
 
-	if ( !silgy_svc_init() )
-	{
-		ERR("silgy_svc_init failed");
-		clean_up();
-		return EXIT_FAILURE;
+    if ( !silgy_svc_init() )
+    {
+        ERR("silgy_svc_init failed");
+        clean_up();
+        return EXIT_FAILURE;
     }
 
     /* ------------------------------------------------------------------- */
@@ -5955,9 +6347,9 @@ int main(int argc, char *argv[])
         }
     }
 
-	clean_up();
+    clean_up();
 
-	return EXIT_SUCCESS;
+    return EXIT_SUCCESS;
 }
 
 

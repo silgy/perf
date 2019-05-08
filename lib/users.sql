@@ -10,23 +10,23 @@ create table users (
     login_u char(30) not null,      -- uppercase version
     email char(120),
     email_u char(120),              -- uppercase version
-    name char(60),
+    name varchar(120),
     phone char(30),
     passwd1 char(30) not null,
     passwd2 char(30) not null,
     about varchar(250),
-    status tinyint not null,        -- 0 = inactive, 1 = active
+    role tinyint,                   -- 10 = user, 20 = moderator, 30 = admin
+    status tinyint not null,        -- 0 = inactive, 1 = active, 2 = locked, 9 = deleted
     created datetime not null,
     last_login datetime,
     visits integer not null,
-    settings integer not null,
     ula_time datetime,              -- unsuccessful login attempt time
-    ula_cnt tinyint not null,       -- and count
-    deleted char(1) not null        -- 'Y' / 'N'
+    ula_cnt tinyint not null        -- and count
 );
 
 create index users_login on users (login_u);
 create index users_email on users (email_u);
+create index users_last_login on users (last_login);
 
 
 -- user settings
@@ -49,6 +49,8 @@ create table users_logins (
     created datetime not null,
     last_used datetime not null
 );
+
+create index users_logins_uid on users_logins (user_id);
 
 
 -- account activations

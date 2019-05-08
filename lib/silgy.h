@@ -16,10 +16,10 @@
 /* __VA_ARGS__ issue */
 #define EXPAND_VA(x) x
 /* access function */
-#define	F_OK    0       /* test for existence of file */
-#define	X_OK    0x01    /* test for execute or search permission */
-#define	W_OK    0x02    /* test for write permission */
-#define	R_OK    0x04    /* test for read permission */
+#define F_OK    0       /* test for existence of file */
+#define X_OK    0x01    /* test for execute or search permission */
+#define W_OK    0x02    /* test for write permission */
+#define R_OK    0x04    /* test for read permission */
 #endif  /* _MSC_VER */
 #undef _WIN32_WINNT
 #define _WIN32_WINNT 0x0501 /* Windows XP or higher required */
@@ -63,7 +63,7 @@ typedef char                        bool;
 #endif  /* __cplusplus */
 
 
-#define WEB_SERVER_VERSION          "4.1.1"
+#define WEB_SERVER_VERSION          "4.2"
 /* alias */
 #define SILGY_VERSION               WEB_SERVER_VERSION
 
@@ -239,8 +239,10 @@ typedef char str64k[1024*64];
 #define PRINT_HTTP_DATE                 (sprintf(G_tmp, "Date: %s\r\n", M_resp_date), HOUT(G_tmp))
 
 /* cache control */
+#define PRINT_HTTP_CACHE_PUBLIC         HOUT("Cache-Control: public, max-age=31536000\r\n")
 #define PRINT_HTTP_NO_CACHE             HOUT("Cache-Control: private, must-revalidate, no-store, no-cache, max-age=0\r\n")
-#define PRINT_HTTP_EXPIRES              (sprintf(G_tmp, "Expires: %s\r\n", M_expires), HOUT(G_tmp))
+#define PRINT_HTTP_EXPIRES_STATICS      (sprintf(G_tmp, "Expires: %s\r\n", M_expires_stat), HOUT(G_tmp))
+#define PRINT_HTTP_EXPIRES_GENERATED    (sprintf(G_tmp, "Expires: %s\r\n", M_expires_gen), HOUT(G_tmp))
 #define PRINT_HTTP_LAST_MODIFIED(str)   (sprintf(G_tmp, "Last-Modified: %s\r\n", str), HOUT(G_tmp))
 
 /* connection */
@@ -415,7 +417,7 @@ typedef char str64k[1024*64];
 
 #define LOGIN_LEN                       30
 #define EMAIL_LEN                       120
-#define UNAME_LEN                       60
+#define UNAME_LEN                       120
 #define PHONE_LEN                       30
 #define ABOUT_LEN                       250
 
@@ -431,7 +433,16 @@ typedef char str64k[1024*64];
 
 #define LANG_LEN                        7
 
-#define EXPIRES_IN_DAYS                 30              /* from app start for Expires HTTP reponse header for static resources */
+
+/* response caching */
+
+#ifndef EXPIRES_STATICS
+#define EXPIRES_STATICS                 90      /* days */
+#endif
+
+#ifndef EXPIRES_GENERATED
+#define EXPIRES_GENERATED               30      /* days */
+#endif
 
 
 /* authorization levels */
@@ -785,8 +796,24 @@ typedef struct {
     char    name_tmp[UNAME_LEN+1];
     char    phone_tmp[PHONE_LEN+1];
     char    about_tmp[ABOUT_LEN+1];
+    short   role;
     time_t  last_activity;
 } usession_t;
+
+
+/* user role */
+
+#define USER_ROLE_ANONYMOUS             0
+#define USER_ROLE_CUSTOMER              5
+#define USER_ROLE_USER                  10
+#define USER_ROLE_MODERATOR             20
+#define USER_ROLE_ADMIN                 30
+
+#define LOGGED                          US.logged
+#define CUSTOMER                        (US.role==USER_ROLE_CUSTOMER)
+#define MODERATOR                       (US.role==USER_ROLE_MODERATOR)
+#define ADMIN                           (US.role==USER_ROLE_ADMIN)
+#define UID                             US.uid
 
 
 /* static resources */
@@ -816,6 +843,32 @@ typedef struct {
     double  average;        /* average request elapsed */
 } counters_t;
 
+
+/* admin info */
+
+typedef struct {
+    char sql[1024];
+    char th[256];
+    char type[32];
+} admin_info_t;
+
+
+/* counters formatted */
+
+typedef struct {
+    char req[64];
+    char req_dsk[64];
+    char req_mob[64];
+    char req_bot[64];
+    char visits[64];
+    char visits_dsk[64];
+    char visits_mob[64];
+    char blocked[64];
+    char average[64];
+} counters_fmt_t;
+
+
+/* messages */
 
 #define MAX_MSG_LEN     255
 #define MAX_MESSAGES    1000
@@ -1025,6 +1078,7 @@ extern "C" {
     char *get_qs_param_multipart(int ci, const char *fieldname, long *retlen, char *retfname);
     char *eng_get_header(int ci, const char *header);
     void eng_rest_header_pass(int ci, const char *header);
+    void silgy_admin_info(int ci, int rows, admin_info_t ai[], int ai_cnt);
 
     /* public app functions */
 

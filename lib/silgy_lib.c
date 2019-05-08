@@ -70,12 +70,15 @@ static SSL *M_rest_ssl=NULL;
 static void *M_rest_ssl=NULL;    /* dummy */
 #endif  /* HTTPS */
 
+static bool M_rest_proxy=FALSE;
+
 static unsigned char M_random_numbers[RANDOM_NUMBERS];
 static char M_random_initialized=0;
 
+
 static void seed_rand(void);
-static void minify_1(char *dest, const char *src);
-static int minify_2(char *dest, const char *src);
+static void minify_1(char *dest, const char *src, int len);
+static int  minify_2(char *dest, const char *src);
 static void get_byteorder32(void);
 static void get_byteorder64(void);
 
@@ -136,7 +139,7 @@ char *silgy_message(int code)
         if ( G_messages[i].code == code )
             return G_messages[i].message;
 
-    static char unknown[256];
+static char unknown[128];
     sprintf(unknown, "Unknown code: %d", code);
     return unknown;
 }
@@ -352,13 +355,13 @@ static bool init_ssl_client()
         return FALSE;
     }
 
-    const long flags = SSL_OP_ALL | SSL_OP_NO_SSLv2;
-    SSL_CTX_set_options(M_ssl_ctx, flags);
+//    const long flags = SSL_OP_ALL | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_COMPRESSION;
+//    SSL_CTX_set_options(M_ssl_ctx, flags);
 
     /* temporarily ignore server cert errors */
 
     WAR("Ignoring remote server cert errors for REST calls");
-    SSL_CTX_set_verify(M_ssl_ctx, SSL_VERIFY_NONE, NULL);
+//    SSL_CTX_set_verify(M_ssl_ctx, SSL_VERIFY_NONE, NULL);
 
 #endif  /* HTTPS */
     return TRUE;
@@ -602,6 +605,15 @@ static bool rest_header_present(const char *key)
 
 
 /* --------------------------------------------------------------------------
+   REST call / set proxy
+-------------------------------------------------------------------------- */
+void lib_rest_proxy(bool value)
+{
+    M_rest_proxy = value;
+}
+
+
+/* --------------------------------------------------------------------------
    REST call / render request
 -------------------------------------------------------------------------- */
 static int rest_render_req(char *buffer, const char *method, const char *host, const char *uri, const void *req, bool json, bool keep)
@@ -611,7 +623,12 @@ static int rest_render_req(char *buffer, const char *method, const char *host, c
     /* header */
 
     p = stpcpy(p, method);
-    p = stpcpy(p, " /");
+
+    if ( M_rest_proxy )
+        p = stpcpy(p, " ");
+    else
+        p = stpcpy(p, " /");
+
     p = stpcpy(p, uri);
     p = stpcpy(p, " HTTP/1.1\r\n");
     p = stpcpy(p, "Host: ");
@@ -637,6 +654,16 @@ static int rest_render_req(char *buffer, const char *method, const char *host, c
         p = stpcpy(p, tmp);
     }
 
+    if ( json && !rest_header_present("Accept") )
+        p = stpcpy(p, "Accept: application/json\r\n");
+
+/*    if ( !rest_header_present("Accept-Encoding") )
+        p = stpcpy(p, "Accept-Encoding: gzip, deflate, br\r\n");
+
+    p = stpcpy(p, "Pragma: no-cache\r\n");
+    p = stpcpy(p, "Cache-Control: no-cache\r\n");
+    p = stpcpy(p, "Accept-Language: en-GB,en;q=0.9\r\n"); */
+
     int i;
 
     for ( i=0; i<M_rest_headers_cnt; ++i )
@@ -654,13 +681,18 @@ static int rest_render_req(char *buffer, const char *method, const char *host, c
         p = stpcpy(p, "Connection: keep-alive\r\n");
     else
         p = stpcpy(p, "Connection: close\r\n");
+
 #ifndef NO_IDENTITY
+    if ( !rest_header_present("User-Agent") )
 #ifdef SILGY_AS_BOT
-    p = stpcpy(p, "User-Agent: Silgy Bot\r\n");
+        p = stpcpy(p, "User-Agent: Silgy Bot\r\n");
 #else
-    p = stpcpy(p, "User-Agent: Silgy\r\n");
+        p = stpcpy(p, "User-Agent: Silgy\r\n");
 #endif
-#endif
+#endif  /* NO_IDENTITY */
+
+    /* end of headers */
+
     p = stpcpy(p, "\r\n");
 
     /* body */
@@ -729,12 +761,6 @@ static int addresses_cnt=0, addresses_last=0;
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_protocol = IPPROTO_TCP;
 
-/*        char svc[8];
-        if ( secure )
-            strcpy(svc, "https");
-        else
-            strcpy(svc, "http"); */
-
         if ( (s=getaddrinfo(host, port, &hints, &result)) != 0 )
         {
             ERR("getaddrinfo: %s", gai_strerror(s));
@@ -757,6 +783,9 @@ static int addresses_cnt=0, addresses_last=0;
 
     for ( rp=result; rp!=NULL; rp=rp->ai_next )
     {
+#ifdef DUMP
+        DBG("Trying socket...");
+#endif
         M_rest_sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (M_rest_sock == -1) continue;
 #ifdef DUMP
@@ -783,10 +812,10 @@ static int addresses_cnt=0, addresses_last=0;
             break;  /* success within timeout */
         }
 
-        close_conn(M_rest_sock);     /* no cigar */
+        close_conn(M_rest_sock);   /* no cigar */
     }
 
-    if ( rp == NULL )     /* No address succeeded */
+    if ( rp == NULL )   /* no address succeeded */
     {
         ERR("Could not connect");
         if ( result && !addr_cached ) freeaddrinfo(result);
@@ -810,6 +839,16 @@ static int addresses_cnt=0, addresses_last=0;
         memcpy(&addresses[addresses_last].ai_addr, rp->ai_addr, sizeof(struct sockaddr));
         addresses[addresses_last].addr.ai_addr = &addresses[addresses_last].ai_addr;
         addresses[addresses_last].addr.ai_next = NULL;
+
+        /* get the remote address */
+        char remote_addr[INET_ADDRSTRLEN]="";
+        struct sockaddr_in *remote_addr_struct = (struct sockaddr_in*)rp->ai_addr;
+#ifdef _WIN32   /* Windows */
+        strcpy(remote_addr, inet_ntoa(remote_addr_struct->sin_addr));
+#else
+        inet_ntop(AF_INET, &(remote_addr_struct->sin_addr), remote_addr, INET_ADDRSTRLEN);
+#endif
+        INF("Connected to %s", remote_addr);
 
         DBG("Host [%s:%s] added to cache (%d)", host, port, addresses_last);
 
@@ -892,8 +931,19 @@ static int addresses_cnt=0, addresses_last=0;
 #ifdef DUMP
         DBG("elapsed after SSL connect: %.3lf ms", lib_elapsed(start));
 #endif
-
-//        cert = SSL_get_peer_certificate(M_rest_ssl);
+        X509 *server_cert;
+        server_cert = SSL_get_peer_certificate(M_rest_ssl);
+        if ( server_cert )
+        {
+            DBG("Got server certificate");
+			X509_NAME *certname;
+			certname = X509_NAME_new();
+			certname = X509_get_subject_name(server_cert);
+			DBG("server_cert [%s]", X509_NAME_oneline(certname, NULL, 0));
+            X509_free(server_cert);
+        }
+        else
+            WAR("Couldn't get server certificate");
     }
 #endif  /* HTTPS */
 
@@ -1133,6 +1183,9 @@ static char buffer[JSON_BUFSIZE];
 
     if ( !rest_parse_url(url, host, port, uri, &secure) ) return FALSE;
 
+    if ( M_rest_proxy )
+        strcpy(uri, url);
+
     len = rest_render_req(buffer, method, host, uri, req, json, keep);
 
 #ifdef DUMP
@@ -1175,7 +1228,18 @@ static char buffer[JSON_BUFSIZE];
     {
 #ifdef HTTPS
         if ( secure )
+        {
+/*            char first_char[2];
+            first_char[0] = buffer[0];
+            first_char[1] = EOS;
+
+            bytes = SSL_write(M_rest_ssl, first_char, 1);
+
+            if ( bytes > 0 )
+                bytes = SSL_write(M_rest_ssl, buffer+1, len-1) + bytes; */
+
             bytes = SSL_write(M_rest_ssl, buffer, len);
+        }
         else
 #endif  /* HTTPS */
             bytes = send(M_rest_sock, buffer, len, 0);    /* try in one go */
@@ -2762,7 +2826,7 @@ static char dst[MAX_LONG_URI_VAL_LEN+1];
 /* --------------------------------------------------------------------------
    Primitive URI encoding
 ---------------------------------------------------------------------------*/
-char *uri_encode(const char *str)
+/*char *uri_encode(const char *str)
 {
 static char uri_encode[4096];
     int     i;
@@ -2778,7 +2842,7 @@ static char uri_encode[4096];
     uri_encode[i] = EOS;
 
     return uri_encode;
-}
+}*/
 
 
 /* --------------------------------------------------------------------------
@@ -2914,7 +2978,7 @@ static unsigned int seeds[SILGY_SEEDS_MEM];
     static int seeded=0;    /* 8 bits */
 
     unsigned int seed;
-    static unsigned int prev_seed=0;
+static unsigned int prev_seed=0;
 
     while ( 1 )
     {
@@ -4373,9 +4437,10 @@ bool silgy_email(const char *to, const char *subject, const char *message)
     }
     else
     {
-        fprintf(mailpipe, "To: %s\n", to);
         fprintf(mailpipe, "From: %s\n", sender);
-        fprintf(mailpipe, "Subject: %s\n\n", subject);
+        fprintf(mailpipe, "To: %s\n", to);
+        fprintf(mailpipe, "Subject: %s\n", subject);
+        fprintf(mailpipe, "Content-Type: text/plain; charset=\"utf-8\"\n\n");
         fwrite(message, 1, strlen(message), mailpipe);
         fwrite("\n.\n", 1, 3, mailpipe);
         pclose(mailpipe);
@@ -4401,27 +4466,37 @@ bool silgy_email(const char *to, const char *subject, const char *message)
 -------------------------------------------------------------------------- */
 int silgy_minify(char *dest, const char *src)
 {
-static char temp[4194304];
+    char *temp;
 
-    minify_1(temp, src);
-    return minify_2(dest, temp);
+    int len = strlen(src);
+
+    if ( !(temp=(char*)malloc(len+1)) )
+    {
+        ERR("Couldn't allocate %d bytes for silgy_minify", len);
+        return 0;
+    }
+
+    minify_1(temp, src, len);
+
+    int ret = minify_2(dest, temp);
+
+    free(temp);
+
+    return ret;
 }
 
 
 /* --------------------------------------------------------------------------
    First pass -- only remove comments
 -------------------------------------------------------------------------- */
-static void minify_1(char *dest, const char *src)
+static void minify_1(char *dest, const char *src, int len)
 {
-    int     len;
     int     i;
     int     j=0;
     bool    opensq=FALSE;       /* single quote */
     bool    opendq=FALSE;       /* double quote */
     bool    openco=FALSE;       /* comment */
     bool    opensc=FALSE;       /* star comment */
-
-    len = strlen(src);
 
     for ( i=0; i<len; ++i )
     {
@@ -4466,7 +4541,7 @@ static void minify_1(char *dest, const char *src)
 
 
 /* --------------------------------------------------------------------------
-   return new length
+   Return new length
 -------------------------------------------------------------------------- */
 static int minify_2(char *dest, const char *src)
 {
@@ -5536,7 +5611,7 @@ void MD5_Final(unsigned char *result, MD5_CTX *ctx)
 -------------------------------------------------------------------------- */
 char *md5(const char* str)
 {
-    static char result[33];
+static char result[33];
     unsigned char digest[16];
 
     MD5_CTX context;
