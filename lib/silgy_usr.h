@@ -47,12 +47,17 @@
 #define USER_STATUS_INACTIVE            0
 #define USER_STATUS_ACTIVE              1
 #define USER_STATUS_LOCKED              2
+#define USER_STATUS_PASSWORD_CHANGE     3
 #define USER_STATUS_DELETED             9
 
 #ifdef APP_USER_ACTIVATION_HOURS                                /* activate user account within */
 #define USER_ACTIVATION_HOURS           APP_USER_ACTIVATION_HOURS
 #else
 #define USER_ACTIVATION_HOURS           24
+#endif
+
+#ifndef DEF_USER_AUTH_LEVEL
+#define DEF_USER_AUTH_LEVEL             AUTH_LEVEL_USER         /* default user authorization level */
 #endif
 
 
@@ -114,6 +119,7 @@
 #define WAR_ULA_FIRST                   203
 #define WAR_ULA_SECOND                  204
 #define WAR_ULA_THIRD                   205
+#define WAR_PASSWORD_CHANGE             206
 /* ------------------------------------- */
 #define WAR_MAX_USR_WARNING             299
 /* ------------------------------------- */
@@ -215,6 +221,7 @@ extern "C" {
 #endif
     int  silgy_usr_login(int ci);
     int  silgy_usr_create_account(int ci);
+    int  silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email, const char *name, const char *passwd, const char *phone, const char *about, short auth_level);
     int  silgy_usr_send_message(int ci);
     int  silgy_usr_save_account(int ci);
     int  silgy_usr_email_registered(int ci);
@@ -222,6 +229,7 @@ extern "C" {
     int  silgy_usr_send_passwd_reset_email(int ci);
     int  silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid);
     int  silgy_usr_activate(int ci);
+    int  silgy_usr_change_password(int ci);
     int  silgy_usr_reset_password(int ci);
     void silgy_usr_logout(int ci);
     int  silgy_usr_set_str(int ci, const char *us_key, const char *us_val);

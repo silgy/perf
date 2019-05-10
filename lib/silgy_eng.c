@@ -100,8 +100,8 @@ http_status_t   M_http_status[]={
 
 static struct {
     char    resource[MAX_RESOURCE_LEN+1];
-    char    level;
-    }       M_auth_levels[MAX_RESOURCES] = {
+    short   level;
+    } M_auth_levels[MAX_RESOURCES] = {
         {"-", EOS}
     };
 
@@ -203,7 +203,7 @@ int main(int argc, char **argv)
 
 static struct   sockaddr_in serv_addr;      /* static = initialised to zeros */
 static struct   sockaddr_in cli_addr;       /* static = initialised to zeros */
-    unsigned int addr_len=0;
+//    unsigned int addr_len=0;
     unsigned long hit=0;
     char        remote_addr[INET_ADDRSTRLEN]=""; /* remote address */
     int         reuse_addr=1;               /* Used so we can re-bind to our port while a previous connection is still in TIME_WAIT state */
@@ -350,24 +350,7 @@ static struct   sockaddr_in cli_addr;       /* static = initialised to zeros */
 
 #endif  /* HTTPS */
 
-    addr_len = sizeof(cli_addr);
-
-
-#ifdef DBMYSQL
-
-    DBG("Trying lib_open_db...");
-
-    if ( !lib_open_db() )
-    {
-        ERR("lib_open_db failed");
-        clean_up();
-        return EXIT_FAILURE;
-    }
-
-    ALWAYS("Database connected");
-
-#endif  /* DBMYSQL */
-
+//    addr_len = sizeof(cli_addr);
 
     /* log currently used memory */
 
@@ -1661,14 +1644,24 @@ static bool init(int argc, char **argv)
     ALWAYS("            APP_DOMAIN = %s", APP_DOMAIN);
     ALWAYS("           APP_VERSION = %s", APP_VERSION);
     ALWAYS("         APP_LOGIN_URI = %s", APP_LOGIN_URI);
-    if ( APP_DEF_AUTH_LEVEL == AUTH_LEVEL_NONE )
-        ALWAYS("    APP_DEF_AUTH_LEVEL = AUTH_LEVEL_NONE");
-    else if ( APP_DEF_AUTH_LEVEL == AUTH_LEVEL_ANONYMOUS )
-        ALWAYS("    APP_DEF_AUTH_LEVEL = AUTH_LEVEL_ANONYMOUS");
-    else if ( APP_DEF_AUTH_LEVEL == AUTH_LEVEL_LOGGEDIN )
-        ALWAYS("    APP_DEF_AUTH_LEVEL = AUTH_LEVEL_LOGGEDIN");
-    else if ( APP_DEF_AUTH_LEVEL == AUTH_LEVEL_ADMIN )
-        ALWAYS("    APP_DEF_AUTH_LEVEL = AUTH_LEVEL_ADMIN");
+    if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_NONE )
+        ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_NONE");
+    else if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_ANONYMOUS )
+        ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_ANONYMOUS");
+    else if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_LOGGEDIN )
+        ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_LOGGEDIN");
+    else if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_USER )
+        ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_USER");
+    else if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_CUSTOMER )
+        ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_CUSTOMER");
+    else if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_STAFF )
+        ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_STAFF");
+    else if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_MODERATOR )
+        ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_MODERATOR");
+    else if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_ADMIN )
+        ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_ADMIN");
+    else if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_ROOT )
+        ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_ROOT");
 #ifdef APP_ADMIN_EMAIL
     ALWAYS("       APP_ADMIN_EMAIL = %s", APP_ADMIN_EMAIL);
 #endif
@@ -1693,6 +1686,22 @@ static bool init(int argc, char **argv)
     WAR("DUMP is enabled, this file may grow big quickly!");
     ALWAYS("");
 #endif  /* DUMP */
+
+
+#ifdef DBMYSQL
+
+    DBG("Trying lib_open_db...");
+
+    if ( !lib_open_db() )
+    {
+        ERR("lib_open_db failed");
+        return FALSE;
+    }
+
+    ALWAYS("Database connected");
+
+#endif  /* DBMYSQL */
+
 
     /* custom init
        Among others, that may contain generating statics, like css and js */
@@ -2822,19 +2831,19 @@ static void process_req(int ci)
 
         if ( ret == OK )    /* valid sesid -- user logged in */
             DBG("User logged in from cookie");
-        else if ( ret != ERR_INT_SERVER_ERROR && ret != ERR_SERVER_TOOBUSY )    /* dodged sesid... or session expired */
+        else if ( ret != ERR_INT_SERVER_ERROR && ret != ERR_SERVER_TOOBUSY )   /* dodged sesid... or session expired */
             WAR("Invalid ls cookie");
     }
 
-    if ( conn[ci].auth_level==AUTH_LEVEL_ADMIN && !ADMIN )  /* return not found */
+    if ( LOGGED && conn[ci].required_auth_level > uses[conn[ci].usi].auth_level )
     {
-        INF("AUTH_LEVEL_ADMIN required, returning 404");
+        WAR("Insufficient user authorization level, returning 404");
         ret = ERR_NOT_FOUND;
         RES_DONT_CACHE;
     }
-    else if ( conn[ci].auth_level==AUTH_LEVEL_LOGGEDIN && !LOGGED )    /* redirect to login page */
+    else if ( !LOGGED && conn[ci].required_auth_level > AUTH_LEVEL_ANONYMOUS )  /* redirect to login page */
     {
-        INF("AUTH_LEVEL_LOGGEDIN required, redirecting to login");
+        INF("auth_level > AUTH_LEVEL_ANONYMOUS required, redirecting to login");
         ret = ERR_REDIRECTION;
         if ( !strlen(APP_LOGIN_URI) )   /* login page = landing page */
             sprintf(conn[ci].location, "%s://%s", PROTOCOL, conn[ci].host);
@@ -2846,9 +2855,9 @@ static void process_req(int ci)
         ret = OK;
     }
 
-    if ( conn[ci].auth_level==AUTH_LEVEL_ANONYMOUS && !REQ_BOT && !conn[ci].head_only && !LOGGED )    /* anonymous user session required */
+    if ( conn[ci].required_auth_level==AUTH_LEVEL_ANONYMOUS && !REQ_BOT && !conn[ci].head_only && !LOGGED )    /* anonymous user session required */
 #else
-    if ( conn[ci].auth_level==AUTH_LEVEL_ANONYMOUS && !REQ_BOT && !conn[ci].head_only )
+    if ( conn[ci].required_auth_level==AUTH_LEVEL_ANONYMOUS && !REQ_BOT && !conn[ci].head_only )
 #endif
     {
         if ( !conn[ci].cookie_in_a[0] || !a_usession_ok(ci) )       /* valid anonymous sesid cookie not present */
@@ -2905,6 +2914,22 @@ static void process_req(int ci)
 #else
             conn[ci].p_content = conn[ci].out_data;
 #endif
+            if ( ret == OK )   /* RES_STATUS could be used, show the proper message */
+            {
+                if ( conn[ci].status == 400 )
+                    ret = ERR_INVALID_REQUEST;
+                else if ( conn[ci].status == 401 )
+                    ret = ERR_UNAUTHORIZED;
+                else if ( conn[ci].status == 403 )
+                    ret = ERR_FORBIDDEN;
+                else if ( conn[ci].status == 404 )
+                    ret = ERR_NOT_FOUND;
+                else if ( conn[ci].status == 500 )
+                    ret = ERR_INT_SERVER_ERROR;
+                else if ( conn[ci].status == 503 )
+                    ret = ERR_SERVER_TOOBUSY;
+            }
+
             gen_page_msg(ci, ret);
         }
 
@@ -3383,7 +3408,7 @@ static void reset_conn(int ci, char new_state)
     conn[ci].in_ctype = CONTENT_TYPE_URLENCODED;
     conn[ci].boundary[0] = EOS;
     conn[ci].authorization[0] = EOS;
-    conn[ci].auth_level = APP_DEF_AUTH_LEVEL;
+    conn[ci].required_auth_level = DEF_RES_AUTH_LEVEL;
 
     conn[ci].out_data = conn[ci].out_data_alloc;
 
@@ -3771,7 +3796,7 @@ static int parse_req(int ci, int len)
         {
             if ( REQ(M_auth_levels[i].resource) )
             {
-                conn[ci].auth_level = M_auth_levels[i].level;
+                conn[ci].required_auth_level = M_auth_levels[i].level;
                 break;
             }
             ++i;
@@ -3779,7 +3804,7 @@ static int parse_req(int ci, int len)
     }
     else    /* don't do any checks for static resources */
     {
-        conn[ci].auth_level = AUTH_LEVEL_NONE;
+        conn[ci].required_auth_level = AUTH_LEVEL_NONE;
     }
 
     /* ignore Range requests for now -------------------------------------------- */
@@ -4360,7 +4385,7 @@ static bool init_ssl()
 /* --------------------------------------------------------------------------
    Set required authorization level for the resource
 -------------------------------------------------------------------------- */
-void silgy_set_auth_level(const char *resource, char level)
+void silgy_set_auth_level(const char *resource, short level)
 {
 static int current=0;
 
@@ -5876,30 +5901,36 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
 -------------------------------------------------------------------------- */
 void silgy_admin_info(int ci, int users, admin_info_t ai[], int ai_cnt, bool header_n_footer)
 {
-    if ( header_n_footer )
-        OUT_HTML_HEADER;
-
-    /* ------------------------------------------------------------------- */
-    /* Style */
-
-    OUT("<style>");
-    OUT("body{font-family:monospace;font-size:10pt;}");
-    OUT(".r{text-align:right;}");
-    OUT(".g{color:grey;}");
-    OUT("</style>");
-
-    OUT("<h1>Admin Info</h1>");
-
-    if ( !ADMIN )
+#ifdef USERS
+    if ( !LOGGED || uses[conn[ci].usi].auth_level < AUTH_LEVEL_ADMIN )
     {
-        ERR("Not an admin");
-        OUT("<p>Not an admin</p>");
-        RES_STATUS(403);
-        if ( header_n_footer )
-            OUT_HTML_FOOTER;
-        RES_DONT_CACHE;
+        ERR("silgy_admin_info: user authorization level < %d", AUTH_LEVEL_ADMIN);
+        RES_STATUS(404);
         return;
     }
+#endif  /* USERS */
+
+    /* ------------------------------------------------------------------- */
+
+    if ( header_n_footer )
+    {
+        OUT_HTML_HEADER;
+
+        OUT("<style>");
+        OUT("body{font-family:monospace;font-size:10pt;}");
+        OUT(".r{text-align:right;}");
+        OUT(".g{color:grey;}");
+        OUT("</style>");
+    }
+    else
+    {
+        OUT("<style>");
+        OUT(".r{text-align:right;}");
+        OUT(".g{color:grey;}");
+        OUT("</style>");
+    }
+
+    OUT("<h1>Admin Info</h1>");
 
     OUT("<h2>Server</h2>");
 
