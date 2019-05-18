@@ -10,8 +10,8 @@
 
 
 #define APP_WEBSITE                 "Web App Performance Tester"
-#define APP_VERSION                 "0.3"
-#define APP_DEF_AUTH_LEVEL          AUTH_LEVEL_ANONYMOUS
+#define APP_VERSION                 "0.4"
+#define DEF_RES_AUTH_LEVEL          AUTH_LEVEL_ANONYMOUS
 
 
 #define ASYNC

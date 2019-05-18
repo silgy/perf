@@ -119,26 +119,9 @@ void silgy_app_main(int ci)
    Called after CALL_ASYNC()
    when response has been received from silgy_services process
 -------------------------------------------------------------------------------- */
-void silgy_app_continue(int ci, const char *data)
+/*void silgy_app_continue(int ci, const char *data)
 {
-    OUT("%d|", ASYNC_ERR_CODE);
-
-    if ( ASYNC_ERR_CODE == ERR_ASYNC_TIMEOUT )
-        OUT("Timeout");
-    else if ( ASYNC_ERR_CODE == ERR_REMOTE_CALL )
-        OUT("Call failed");
-    else if ( ASYNC_ERR_CODE == ERR_REMOTE_CALL_STATUS )
-        OUT("Call response status wasn't successful");
-    else if ( ASYNC_ERR_CODE == OK )
-        OUT("OK");
-
-    char formatted[64];
-    amtd(formatted, G_rest_average);
-    OUT("|%s", formatted);
-    OUT("|%f", AUS.elapsed);
-
-    RES_DONT_CACHE;
-}
+}*/
 
 
 /* --------------------------------------------------------------------------------

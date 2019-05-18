@@ -1,8 +1,8 @@
 #!/bin/sh
 
-echo "Stopping Silgy..."
-
 export SILGYDIR=/home/ec2-user/perf
+
+echo "Stopping Silgy..."
 
 # ---------------------------------------------------------------------
 # Services

@@ -1,8 +1,9 @@
 #!/bin/sh
 
-echo "Starting Silgy..."
-
 export SILGYDIR=/home/ec2-user/perf
+export SILGY_SVC_PROCESSES=10
+
+echo "Starting Silgy..."
 
 # ---------------------------------------------------------------------
 # Main app
@@ -13,17 +14,10 @@ sleep 1
 
 # ---------------------------------------------------------------------
 # Services
-# Start as many as you need
 
-nohup $SILGYDIR/bin/silgy_svc &
-nohup $SILGYDIR/bin/silgy_svc &
-nohup $SILGYDIR/bin/silgy_svc &
-nohup $SILGYDIR/bin/silgy_svc &
-nohup $SILGYDIR/bin/silgy_svc &
-nohup $SILGYDIR/bin/silgy_svc &
-nohup $SILGYDIR/bin/silgy_svc &
-nohup $SILGYDIR/bin/silgy_svc &
-nohup $SILGYDIR/bin/silgy_svc &
-nohup $SILGYDIR/bin/silgy_svc &
+for i in `seq 1 $SILGY_SVC_PROCESSES`
+do
+    nohup $SILGYDIR/bin/silgy_svc &
+done
 
 sleep 1  # return to prompt
