@@ -47,20 +47,25 @@ ausession_t auses[MAX_SESSIONS+1]={0};  /* app user sessions, using the same ind
 int         G_sessions=0;               /* number of active user sessions */
 int         G_sessions_hwm=0;           /* highest number of active user sessions (high water mark) */
 char        G_last_modified[32]="";     /* response header field with server's start time */
+
 #ifdef DBMYSQL
 MYSQL       *G_dbconn=NULL;             /* database connection */
 #endif
-#ifndef _WIN32
+
 /* asynchorous processing */
+#ifndef _WIN32
 char        G_req_queue_name[256]="";
 char        G_res_queue_name[256]="";
 mqd_t       G_queue_req={0};            /* request queue */
 mqd_t       G_queue_res={0};            /* response queue */
 #ifdef ASYNC
 async_res_t ares[MAX_ASYNC]={0};        /* async response array */
-long        G_last_call_id=0;           /* counter */
+int         G_last_call_id=0;           /* counter */
 #endif  /* ASYNC */
 #endif  /* _WIN32 */
+int         G_async_req_data_size=ASYNC_REQ_MSG_SIZE-sizeof(async_req_hdr_t); /* how many bytes are left for data */
+int         G_async_res_data_size=ASYNC_RES_MSG_SIZE-sizeof(async_res_hdr_t); /* how many bytes are left for data */
+
 bool        G_index_present=FALSE;      /* index.html present in res? */
 
 char        G_blacklist[MAX_BLACKLIST+1][INET_ADDRSTRLEN];
@@ -156,6 +161,10 @@ static bool         M_shutdown=FALSE;
 static int          M_prev_minute;
 static int          M_prev_day;
 static time_t       M_last_housekeeping=0;
+
+#ifdef ASYNC
+static char         *M_async_shm=NULL;
+#endif
 
 
 /* prototypes */
@@ -397,8 +406,10 @@ int main(int argc, char **argv)
             if ( ares[j].hdr.state==ASYNC_STATE_SENT && ares[j].hdr.sent < G_now-ares[j].hdr.timeout )
             {
                 DBG("Async request %d timeout-ed", j);
-                ares[j].hdr.state = ASYNC_STATE_TIMEOUTED;
-                conn[ares[j].hdr.ci].ai = j;
+                conn[ares[j].hdr.ci].async_err_code = ERR_ASYNC_TIMEOUT;
+                conn[ares[j].hdr.ci].status = 500;
+                ares[j].hdr.state = ASYNC_STATE_FREE;
+                gen_response_header(ares[j].hdr.ci);
             }
         }
 #endif
@@ -625,6 +636,10 @@ int main(int argc, char **argv)
                             dbg_last_time3 = G_now;
                         }
 #endif  /* DUMP */
+
+
+/* ----------------------------------------------------------------------------------------------------------------------- */
+#ifdef ASYNC_USE_APP_CONTINUE   /* depreciated */
                         /* async processing */
 #ifdef ASYNC
                         if ( conn[i].conn_state == CONN_STATE_WAITING_FOR_ASYNC )
@@ -649,32 +664,18 @@ int main(int argc, char **argv)
                                     if ( conn[i].usi )  /* update user session */
                                     {
                                         memcpy(&uses[conn[i].usi], &ares[conn[i].ai].hdr.uses, sizeof(usession_t));
-#ifdef ASYNC_AUSES
+#ifndef ASYNC_EXCLUDE_AUSES
                                         memcpy(&auses[conn[i].usi], &ares[conn[i].ai].hdr.auses, sizeof(ausession_t));
 #endif
                                     }
-#ifdef ASYNC_USE_APP_CONTINUE   /* depreciated */
                                     silgy_app_continue(i, ares[conn[i].ai].data);
-#else
-#ifdef OUTCHECKREALLOC
-                                    eng_out_check_realloc_bin(i, ares[conn[i].ai].data, ares[conn[i].ai].hdr.len);
-#else
-                                    int checked_len = ares[conn[i].ai].hdr.len > OUT_BUFSIZE-OUT_HEADER_BUFSIZE ? OUT_BUFSIZE-OUT_HEADER_BUFSIZE : ares[conn[i].ai].hdr.len;
-                                    memcpy(conn[i].p_content, ares[conn[i].ai].data, checked_len);
-                                    conn[i].p_content += checked_len;
-#endif
-#endif  /* ASYNC_USE_APP_CONTINUE */
                                 }
                                 else if ( ares[conn[i].ai].hdr.state == ASYNC_STATE_TIMEOUTED )
                                 {
-                                    ERR("CALL_ASYNC call_id=%ld timeouted", ares[conn[i].ai].hdr.call_id);
+                                    ERR("CALL_ASYNC call_id=%d timeouted", ares[conn[i].ai].hdr.call_id);
                                     conn[i].async_err_code = ERR_ASYNC_TIMEOUT;
-#ifdef ASYNC_USE_APP_CONTINUE   /* depreciated */
                                     DBG("Async response continue as timeout-ed for ci=%d", i);
                                     silgy_app_continue(i, NULL);
-#else
-                                    conn[i].status = 500;
-#endif  /* ASYNC_USE_APP_CONTINUE */
                                 }
 
                                 gen_response_header(i);
@@ -684,6 +685,10 @@ int main(int argc, char **argv)
                             }
                         }
 #endif  /* ASYNC */
+#endif  /* ASYNC_USE_APP_CONTINUE */
+/* ----------------------------------------------------------------------------------------------------------------------- */
+
+
 #ifdef HTTPS
                         if ( conn[i].secure )   /* HTTPS */
                         {
@@ -691,7 +696,7 @@ int main(int argc, char **argv)
                             {
 #ifdef DUMP
                                 DBG("ci=%d, state == CONN_STATE_READY_TO_SEND_HEADER", i);
-                                DBG("Trying SSL_write %ld bytes to fd=%d (ci=%d)", conn[i].out_hlen, conn[i].fd, i);
+                                DBG("Trying SSL_write %d bytes to fd=%d (ci=%d)", conn[i].out_hlen, conn[i].fd, i);
 #endif  /* DUMP */
 #ifdef SEND_ALL_AT_ONCE
                                 bytes = SSL_write(conn[i].ssl, conn[i].out_start, conn[i].out_len);
@@ -709,7 +714,7 @@ int main(int argc, char **argv)
 #ifdef DUMP
                                 DBG("ci=%d, state == %s", i, conn[i].conn_state==CONN_STATE_READY_TO_SEND_BODY?"CONN_STATE_READY_TO_SEND_BODY":"CONN_STATE_SENDING_BODY");
 #ifdef SEND_ALL_AT_ONCE
-                                DBG("Trying SSL_write %ld bytes to fd=%d (ci=%d)", conn[i].out_len, conn[i].fd, i);
+                                DBG("Trying SSL_write %d bytes to fd=%d (ci=%d)", conn[i].out_len, conn[i].fd, i);
 #else
                                 DBG("Trying SSL_write %d bytes to fd=%d (ci=%d)", conn[i].clen, conn[i].fd, i);
 #endif
@@ -730,9 +735,9 @@ int main(int argc, char **argv)
 #ifdef DUMP
                                 DBG("ci=%d, state == CONN_STATE_READY_TO_SEND_HEADER", i);
 #ifdef SEND_ALL_AT_ONCE
-                                DBG("Trying to write %ld bytes to fd=%d (ci=%d)", conn[i].out_len, conn[i].fd, i);
+                                DBG("Trying to write %d bytes to fd=%d (ci=%d)", conn[i].out_len, conn[i].fd, i);
 #else
-                                DBG("Trying to write %ld bytes to fd=%d (ci=%d)", conn[i].out_hlen, conn[i].fd, i);
+                                DBG("Trying to write %d bytes to fd=%d (ci=%d)", conn[i].out_hlen, conn[i].fd, i);
 #endif
 #endif  /* DUMP */
 #ifdef SEND_ALL_AT_ONCE
@@ -752,7 +757,7 @@ int main(int argc, char **argv)
 #ifdef DUMP
                                 DBG("ci=%d, state == %s", i, conn[i].conn_state==CONN_STATE_READY_TO_SEND_BODY?"CONN_STATE_READY_TO_SEND_BODY":"CONN_STATE_SENDING_BODY");
 #ifdef SEND_ALL_AT_ONCE
-                                DBG("Trying to write %ld bytes to fd=%d (ci=%d)", conn[i].out_len-conn[i].data_sent, conn[i].fd, i);
+                                DBG("Trying to write %d bytes to fd=%d (ci=%d)", conn[i].out_len-conn[i].data_sent, conn[i].fd, i);
 #else
                                 DBG("Trying to write %d bytes to fd=%d (ci=%d)", conn[i].clen-conn[i].data_sent, conn[i].fd, i);
 #endif
@@ -854,38 +859,71 @@ int main(int argc, char **argv)
         if ( mq_receive(G_queue_res, (char*)&res, ASYNC_RES_MSG_SIZE, NULL) != -1 )    /* there's a response in the queue */
 #endif  /* DUMP */
         {
-            DBG("Message received!");
-            DBG("res.hdr.call_id = %ld", res.hdr.call_id);
-            DBG("res.hdr.ci = %d", res.hdr.ci);
-            DBG("res.hdr.service [%s]", res.hdr.service);
+            DBG("Message received");
 
-            if ( res.hdr.rest_req > 0 )    /* update REST stats */
+            DBG("res.hdr.chunk = %d", res.hdr.chunk);
+
+            DBG("res.hdr.call_id=%d", res.hdr.call_id);
+            DBG("res.hdr.ci=%d", res.hdr.ci);
+            DBG("res.hdr.service [%s]", res.hdr.service);
+            DBG("res.hdr.err_code = %d", res.hdr.err_code);
+            DBG("res.hdr.status = %d", res.hdr.status);
+
+            if ( ASYNC_CHUNK_IS_FIRST(res.hdr.chunk) )
             {
-                G_rest_status = res.hdr.rest_status;
-                G_rest_req += res.hdr.rest_req;
-                G_rest_elapsed += res.hdr.rest_elapsed;
-                G_rest_average = G_rest_elapsed / G_rest_req;
+                /* error code & status */
+
+                conn[res.hdr.ci].async_err_code = res.hdr.err_code;
+                conn[res.hdr.ci].status = res.hdr.status;
+
+                /* update user session */
+
+                memcpy(&uses[conn[res.hdr.ci].usi], &res.hdr.uses, sizeof(usession_t));
+#ifndef ASYNC_EXCLUDE_AUSES
+                memcpy(&auses[conn[res.hdr.ci].usi], &res.hdr.auses, sizeof(ausession_t));
+#endif
+                /* update connection details */
+
+                conn[res.hdr.ci].ctype = res.hdr.ctype;
+                strcpy(conn[res.hdr.ci].ctypestr, res.hdr.ctypestr);
+                strcpy(conn[res.hdr.ci].cdisp, res.hdr.cdisp);
+                strcpy(conn[res.hdr.ci].cookie_out_a, res.hdr.cookie_out_a);
+                strcpy(conn[res.hdr.ci].cookie_out_a_exp, res.hdr.cookie_out_a_exp);
+                strcpy(conn[res.hdr.ci].cookie_out_l, res.hdr.cookie_out_l);
+                strcpy(conn[res.hdr.ci].cookie_out_l_exp, res.hdr.cookie_out_l_exp);
+                strcpy(conn[res.hdr.ci].location, res.hdr.location);
+                conn[res.hdr.ci].dont_cache = res.hdr.dont_cache;
+                conn[res.hdr.ci].keep_content = res.hdr.keep_content;
+
+                /* update REST stats */
+
+                if ( res.hdr.rest_req > 0 )
+                {
+                    G_rest_status = res.hdr.rest_status;
+                    G_rest_req += res.hdr.rest_req;
+                    G_rest_elapsed += res.hdr.rest_elapsed;
+                    G_rest_average = G_rest_elapsed / G_rest_req;
+                }
             }
 
-            memcpy(&ares[res.hdr.ai], (char*)&res, sizeof(async_res_t));
+            /* out data */
 
-            ares[res.hdr.ai].hdr.state = ASYNC_STATE_RECEIVED;
+            if ( res.hdr.clen )  /* chunk length */
+            {
+#ifdef OUTCHECKREALLOC
+                eng_out_check_realloc_bin(res.hdr.ci, res.data, res.hdr.clen);
+#else
+                int checked_len = res.hdr.clen > OUT_BUFSIZE-OUT_HEADER_BUFSIZE ? OUT_BUFSIZE-OUT_HEADER_BUFSIZE : res.hdr.clen;
+                memcpy(conn[res.hdr.ci].p_content, res.data, checked_len);
+                conn[res.hdr.ci].p_content += checked_len;
+#endif
+            }
 
-            conn[res.hdr.ci].ai = res.hdr.ai;    /* avoid looping later */
-
-            /* conn update */
-
-            conn[res.hdr.ci].status = res.hdr.status;
-            conn[res.hdr.ci].ctype = res.hdr.ctype;
-            strcpy(conn[res.hdr.ci].ctypestr, res.hdr.ctypestr);
-            strcpy(conn[res.hdr.ci].cdisp, res.hdr.cdisp);
-            strcpy(conn[res.hdr.ci].cookie_out_a, res.hdr.cookie_out_a);
-            strcpy(conn[res.hdr.ci].cookie_out_a_exp, res.hdr.cookie_out_a_exp);
-            strcpy(conn[res.hdr.ci].cookie_out_l, res.hdr.cookie_out_l);
-            strcpy(conn[res.hdr.ci].cookie_out_l_exp, res.hdr.cookie_out_l_exp);
-            strcpy(conn[res.hdr.ci].location, res.hdr.location);
-            conn[res.hdr.ci].dont_cache = res.hdr.dont_cache;
-            conn[res.hdr.ci].keep_content = res.hdr.keep_content;
+            if ( ASYNC_CHUNK_IS_LAST(res.hdr.chunk) )
+            {
+                ares[res.hdr.ai].hdr.state = ASYNC_STATE_FREE;
+                gen_response_header(res.hdr.ci);
+            }
         }
 #ifdef DUMP
         else
@@ -1375,7 +1413,7 @@ static void respond_to_expect(int ci)
     static char reply_refuse[]="HTTP/1.1 413 Request Entity Too Large\r\n\r\n";
     int bytes;
 
-    if ( conn[ci].clen >= MAX_POST_DATA_BUFSIZE )   /* refuse */
+    if ( conn[ci].clen >= MAX_PAYLOAD_SIZE-1 )   /* refuse */
     {
         INF("Sending 413");
 #ifdef HTTPS
@@ -1646,10 +1684,12 @@ static bool init(int argc, char **argv)
     ALWAYS("");
     ALWAYS("    ASYNC_REQ_MSG_SIZE = %d B", ASYNC_REQ_MSG_SIZE);
     ALWAYS("    ASYNC req.hdr size = %lu B (%lu kB / %0.2lf MB)", sizeof(async_req_hdr_t), sizeof(async_req_hdr_t)/1024, (double)sizeof(async_req_hdr_t)/1024/1024);
+    ALWAYS(" G_async_req_data_size = %lu B (%lu kB / %0.2lf MB)", G_async_req_data_size, G_async_req_data_size/1024, (double)G_async_req_data_size/1024/1024);
     ALWAYS("    ASYNC req     size = %lu B (%lu kB / %0.2lf MB)", sizeof(async_req_t), sizeof(async_req_t)/1024, (double)sizeof(async_req_t)/1024/1024);
     ALWAYS("");
     ALWAYS("    ASYNC_RES_MSG_SIZE = %d B", ASYNC_RES_MSG_SIZE);
     ALWAYS("    ASYNC res.hdr size = %lu B (%lu kB / %0.2lf MB)", sizeof(async_res_hdr_t), sizeof(async_res_hdr_t)/1024, (double)sizeof(async_res_hdr_t)/1024/1024);
+    ALWAYS(" G_async_res_data_size = %lu B (%lu kB / %0.2lf MB)", G_async_res_data_size, G_async_res_data_size/1024, (double)G_async_res_data_size/1024/1024);
     ALWAYS("    ASYNC res     size = %lu B (%lu kB / %0.2lf MB)", sizeof(async_res_t), sizeof(async_res_t)/1024, (double)sizeof(async_res_t)/1024/1024);
     ALWAYS("");
 #ifdef OUTFAST
@@ -4082,7 +4122,7 @@ static int set_http_req_val(int ci, const char *label, const char *value)
     else if ( 0==strcmp(ulabel, "CONTENT-LENGTH") )
     {
         conn[ci].clen = atol(value);
-        if ( conn[ci].clen < 0 || (!conn[ci].post && conn[ci].clen >= IN_BUFSIZE) || (conn[ci].post && conn[ci].clen >= MAX_POST_DATA_BUFSIZE) )
+        if ( conn[ci].clen < 0 || (!conn[ci].post && conn[ci].clen >= IN_BUFSIZE) || (conn[ci].post && conn[ci].clen >= MAX_PAYLOAD_SIZE-1) )
         {
             ERR("Request too long, clen = %d, sending 413", conn[ci].clen);
             return 413;
@@ -4150,6 +4190,7 @@ static int set_http_req_val(int ci, const char *label, const char *value)
 /* --------------------------------------------------------------------------
    Check the rules and block IP if matches
    Return TRUE if blocked
+   It doesn't really change anything security-wise but just saves bandwidth
 -------------------------------------------------------------------------- */
 static bool check_block_ip(int ci, const char *rule, const char *value)
 {
@@ -4163,6 +4204,12 @@ static bool check_block_ip(int ci, const char *rule, const char *value)
             || (rule[0]=='R' && 0==strcmp(value, "administrator"))          /* Resource */
             || (rule[0]=='R' && 0==strcmp(value, "phpmyadmin"))             /* Resource */
             || (rule[0]=='R' && 0==strcmp(value, "java.php"))               /* Resource */
+            || (rule[0]=='R' && 0==strcmp(value, "logon.php"))              /* Resource */
+            || (rule[0]=='R' && 0==strcmp(value, "log.php"))                /* Resource */
+            || (rule[0]=='R' && 0==strcmp(value, "hell.php"))               /* Resource */
+            || (rule[0]=='R' && 0==strcmp(value, "shell.php"))              /* Resource */
+            || (rule[0]=='R' && 0==strcmp(value, "tty.php"))                /* Resource */
+            || (rule[0]=='R' && 0==strcmp(value, "cmd.php"))                /* Resource */
             || (rule[0]=='R' && 0==strcmp(value, ".env"))                   /* Resource */
             || (rule[0]=='R' && strstr(value, "setup.php")) )               /* Resource */
     {
@@ -4267,7 +4314,7 @@ static void clean_up()
     WSACleanup();
 #endif  /* _WIN32 */
 
-    log_finish();
+    silgy_lib_done();
 }
 
 
@@ -4521,7 +4568,7 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
 
     async_req_t req;
 
-    if ( G_last_call_id > 10000000 ) G_last_call_id = 0;
+    if ( G_last_call_id >= 1000000000 ) G_last_call_id = 0;
 
     req.hdr.call_id = ++G_last_call_id;
     req.hdr.ci = ci;
@@ -4543,12 +4590,48 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
     strcpy(req.hdr.uagent, conn[ci].uagent);
     req.hdr.mobile = conn[ci].mobile;
     req.hdr.clen = conn[ci].clen;
+
+    /* For POST, the payload can be in the data space of the message,
+       or -- if it's bigger -- in the shared memory */
+
     if ( conn[ci].post )
     {
-        strncpy(req.hdr.in_data, conn[ci].in_data, MAX_URI_LEN);
-        req.hdr.in_data[MAX_URI_LEN] = EOS;
+        if ( conn[ci].clen < G_async_req_data_size )
+        {
+            DBG("Payload fits in msg");
+
+            memcpy(req.data, conn[ci].in_data, conn[ci].clen+1);
+            req.hdr.payload_location = ASYNC_PAYLOAD_MSG;
+        }
+        else    /* ASYNC_PAYLOAD_SHM */
+        {
+            DBG("Payload requires SHM");
+
+            if ( !M_async_shm )
+            {
+                if ( (M_async_shm=lib_shm_create(MAX_PAYLOAD_SIZE, 0)) == NULL )
+                {
+                    ERR("Couldn't create SHM");
+                    return;
+                }
+
+                M_async_shm[MAX_PAYLOAD_SIZE-1] = 0;
+            }
+
+            /* use the last byte as a simple semaphore */
+
+            while ( M_async_shm[MAX_PAYLOAD_SIZE-1] )
+            {
+                WAR("Waiting for the SHM segment to be freed by silgy_svc process");
+                msleep(100);   /* temporarily */
+            }
+
+            memcpy(M_async_shm, conn[ci].in_data, conn[ci].clen+1);
+            M_async_shm[MAX_PAYLOAD_SIZE-1] = 1;
+            req.hdr.payload_location = ASYNC_PAYLOAD_SHM;
+        }
     }
-//    strcpy(req.hdr.cookie_in_l, conn[ci].cookie_in_l);
+
     strcpy(req.hdr.host, conn[ci].host);
     strcpy(req.hdr.website, conn[ci].website);
     strcpy(req.hdr.lang, conn[ci].lang);
@@ -4561,14 +4644,14 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
     if ( conn[ci].usi )
     {
         memcpy(&req.hdr.uses, &US, sizeof(usession_t));
-#ifdef ASYNC_AUSES
+#ifndef ASYNC_EXCLUDE_AUSES
         memcpy(&req.hdr.auses, &AUS, sizeof(ausession_t));
 #endif
     }
     else
     {
         memset(&req.hdr.uses, 0, sizeof(usession_t));
-#ifdef ASYNC_AUSES
+#ifndef ASYNC_EXCLUDE_AUSES
         memset(&req.hdr.auses, 0, sizeof(ausession_t));
 #endif
     }
@@ -4591,8 +4674,8 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
 
     strcpy(req.hdr.last_modified, G_last_modified);
 
-    /* data */
 
+#ifdef ASYNC_USE_APP_CONTINUE   /* depreciated */
     if ( data )
     {
         if ( size )     /* binary */
@@ -4604,6 +4687,8 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
     {
         req.data[0] = EOS;
     }
+#endif  /* ASYNC_USE_APP_CONTINUE */
+
 
     bool found=0;
 
@@ -4626,7 +4711,8 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
                 if ( timeout < 0 ) timeout = 0;
                 if ( timeout == 0 || timeout > ASYNC_MAX_TIMEOUT ) timeout = ASYNC_MAX_TIMEOUT;
                 ares[j].hdr.timeout = timeout;
-                req.hdr.ai = j;   /* avoid looping later */
+                req.hdr.ai = j;
+                conn[ci].ai = j;
                 found = 1;
                 break;
             }
@@ -4652,7 +4738,7 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
 
     if ( found || !response )
     {
-        DBG("Sending a message on behalf of ci=%d, call_id=%ld, service [%s]", ci, req.hdr.call_id, req.hdr.service);
+        DBG("Sending a message on behalf of ci=%d, call_id=%d, service [%s]", ci, req.hdr.call_id, req.hdr.service);
         if ( mq_send(G_queue_req, (char*)&req, ASYNC_REQ_MSG_SIZE, 0) != 0 )
             ERR("mq_send failed, errno = %d (%s)", errno, strerror(errno));
     }
@@ -4791,14 +4877,14 @@ void eng_out_check_realloc(int ci, const char *str)
         char *tmp = (char*)realloc(conn[ci].out_data_alloc, conn[ci].out_data_allocated*2);
         if ( !tmp )
         {
-            ERR("Couldn't reallocate output buffer for ci=%d, tried %ld bytes", ci, conn[ci].out_data_allocated*2);
+            ERR("Couldn't reallocate output buffer for ci=%d, tried %d bytes", ci, conn[ci].out_data_allocated*2);
             return;
         }
         conn[ci].out_data_alloc = tmp;
         conn[ci].out_data = conn[ci].out_data_alloc;
         conn[ci].out_data_allocated = conn[ci].out_data_allocated * 2;
         conn[ci].p_content = conn[ci].out_data + used;
-        INF("Reallocated output buffer for ci=%d, new size = %ld bytes", ci, conn[ci].out_data_allocated);
+        INF("Reallocated output buffer for ci=%d, new size = %d bytes", ci, conn[ci].out_data_allocated);
         eng_out_check_realloc(ci, str);     /* call itself! */
     }
 }
@@ -4807,9 +4893,9 @@ void eng_out_check_realloc(int ci, const char *str)
 /* --------------------------------------------------------------------------
    Write binary data to output buffer with buffer resizing if necessary
 -------------------------------------------------------------------------- */
-void eng_out_check_realloc_bin(int ci, const char *data, long len)
+void eng_out_check_realloc_bin(int ci, const char *data, int len)
 {
-    if ( len < conn[ci].out_data_allocated - (conn[ci].p_content-conn[ci].out_data) )    /* the whole data will fit */
+    if ( len < conn[ci].out_data_allocated - (conn[ci].p_content - conn[ci].out_data) )    /* the whole data will fit */
     {
         memcpy(conn[ci].p_content, data, len);
         conn[ci].p_content += len;
@@ -4820,14 +4906,14 @@ void eng_out_check_realloc_bin(int ci, const char *data, long len)
         char *tmp = (char*)realloc(conn[ci].out_data_alloc, conn[ci].out_data_allocated*2);
         if ( !tmp )
         {
-            ERR("Couldn't reallocate output buffer for ci=%d, tried %ld bytes", ci, conn[ci].out_data_allocated*2);
+            ERR("Couldn't reallocate output buffer for ci=%d, tried %d bytes", ci, conn[ci].out_data_allocated*2);
             return;
         }
         conn[ci].out_data_alloc = tmp;
         conn[ci].out_data = conn[ci].out_data_alloc;
         conn[ci].out_data_allocated = conn[ci].out_data_allocated * 2;
         conn[ci].p_content = conn[ci].out_data + used;
-        INF("Reallocated output buffer for ci=%d, new size = %ld bytes", ci, conn[ci].out_data_allocated);
+        INF("Reallocated output buffer for ci=%d, new size = %d bytes", ci, conn[ci].out_data_allocated);
         eng_out_check_realloc_bin(ci, data, len);       /* call itself! */
     }
 }
@@ -4941,7 +5027,15 @@ char        G_req_queue_name[256]="";
 char        G_res_queue_name[256]="";
 mqd_t       G_queue_req={0};            /* request queue */
 mqd_t       G_queue_res={0};            /* response queue */
+int         G_async_req_data_size=ASYNC_REQ_MSG_SIZE-sizeof(async_req_hdr_t); /* how many bytes are left for data */
+int         G_async_res_data_size=ASYNC_RES_MSG_SIZE-sizeof(async_res_hdr_t); /* how many bytes are left for data */
 int         G_usersRequireAccountActivation=0;
+async_req_t req;
+async_res_t res;
+#ifdef OUTCHECKREALLOC
+char        *out_data=NULL;
+int         out_data_allocated;
+#endif
 char        *p_content=NULL;
 conn_t      conn[MAX_CONNECTIONS+1]={0}; /* request details */
 int         ci=0;
@@ -4974,6 +5068,7 @@ char        G_dbPassword[128]="";
 
 
 static char *M_pidfile;                 /* pid file name */
+static char *M_async_shm=NULL;
 
 
 static void sigdisp(int sig);
@@ -5074,6 +5169,26 @@ int main(int argc, char *argv[])
     strcpy(conn[0].host, APP_DOMAIN);
     strcpy(conn[0].website, APP_WEBSITE);
 
+    if ( !(conn[0].in_data = (char*)malloc(G_async_req_data_size)) )
+    {
+        ERR("malloc for conn[0].in_data failed");
+        return EXIT_FAILURE;
+    }
+
+    conn[0].in_data_allocated = G_async_req_data_size;
+
+#ifdef OUTCHECKREALLOC
+
+    if ( !(out_data = (char*)malloc(OUT_BUFSIZE)) )
+    {
+        ERR("malloc for out_data failed");
+        return EXIT_FAILURE;
+    }
+
+    out_data_allocated = OUT_BUFSIZE;
+
+#endif  /* OUTCHECKREALLOC */
+
     /* open database ----------------------------------------------------- */
 
 #ifdef DBMYSQL
@@ -5151,9 +5266,6 @@ int main(int argc, char *argv[])
 
     /* ------------------------------------------------------------------- */
 
-    async_req_t req;
-    async_res_t res;
-
     int prev_day = G_ptm->tm_mday;
 
     INF("Waiting...\n");
@@ -5188,9 +5300,9 @@ int main(int argc, char *argv[])
             DBG_T("Message received");
 
             if ( G_logLevel > LOG_INF )
-                DBG_T("ci = %d, service [%s], call_id = %ld", req.hdr.ci, req.hdr.service, req.hdr.call_id);
+                DBG_T("ci=%d, service [%s], call_id=%d", req.hdr.ci, req.hdr.service, req.hdr.call_id);
             else
-                INF_T("%s called (id=%ld)", req.hdr.service, req.hdr.call_id);
+                INF_T("%s called (id=%d)", req.hdr.service, req.hdr.call_id);
 
             res.hdr.call_id = req.hdr.call_id;
             res.hdr.ci = req.hdr.ci;
@@ -5208,9 +5320,47 @@ int main(int argc, char *argv[])
             strcpy(conn[0].uagent, req.hdr.uagent);
             conn[0].mobile = req.hdr.mobile;
             conn[0].clen = req.hdr.clen;
+
+            /* For POST, the payload can be in the data space of the message,
+               or -- if it's bigger -- in the shared memory */
+
             if ( req.hdr.post )
-                strcpy(conn[0].in_data, req.hdr.in_data);
-//            strcpy(conn[0].cookie_in_l, req.hdr.cookie_in_l);
+            {
+                if ( req.hdr.payload_location == ASYNC_PAYLOAD_MSG )
+                {
+                    memcpy(conn[0].in_data, req.data, req.hdr.clen+1);
+                }
+                else    /* ASYNC_PAYLOAD_SHM */
+                {
+                    if ( conn[0].in_data_allocated < req.hdr.clen+1 )
+                    {
+                        char *tmp = (char*)realloc(conn[0].in_data, req.hdr.clen+1);
+                        if ( !tmp )
+                        {
+                            ERR("Couldn't realloc in_data, tried %d bytes", req.hdr.clen+1);
+                            continue;
+                        }
+                        conn[0].in_data = tmp;
+                        conn[0].in_data_allocated = req.hdr.clen+1;
+                        INF("Reallocated in_data, new size = %d bytes", req.hdr.clen+1);
+                    }
+
+                    if ( !M_async_shm )
+                    {
+                        if ( (M_async_shm=lib_shm_create(MAX_PAYLOAD_SIZE, 0)) == NULL )
+                        {
+                            ERR("Couldn't attach to SHM");
+                            continue;
+                        }
+                    }
+
+                    memcpy(conn[0].in_data, M_async_shm, req.hdr.clen+1);
+
+                    /* mark it as free */
+                    M_async_shm[MAX_PAYLOAD_SIZE-1] = 0;
+                }
+            }
+
             strcpy(conn[0].host, req.hdr.host);
             strcpy(conn[0].website, req.hdr.website);
             strcpy(conn[0].lang, req.hdr.lang);
@@ -5224,12 +5374,16 @@ int main(int argc, char *argv[])
 
             /* response data */
 
+#ifdef OUTCHECKREALLOC
+            p_content = out_data;
+#else
             p_content = res.data;
+#endif
 
             /* user session */
 
             memcpy(&uses[1], &req.hdr.uses, sizeof(usession_t));
-#ifdef ASYNC_AUSES
+#ifndef ASYNC_EXCLUDE_AUSES
             memcpy(&auses[1], &req.hdr.auses, sizeof(ausession_t));
 #endif
             if ( uses[1].sesid[0] )
@@ -5261,33 +5415,93 @@ int main(int argc, char *argv[])
 
             /* ----------------------------------------------------------- */
 
-            res.hdr.err_code = G_error_code;
-            res.hdr.len = p_content - res.data;
-
-            res.hdr.status = conn[0].status;
-            res.hdr.ctype = conn[0].ctype;
-            strcpy(res.hdr.ctypestr, conn[0].ctypestr);
-            strcpy(res.hdr.cdisp, conn[0].cdisp);
-            strcpy(res.hdr.cookie_out_a, conn[0].cookie_out_a);
-            strcpy(res.hdr.cookie_out_a_exp, conn[0].cookie_out_a_exp);
-            strcpy(res.hdr.cookie_out_l, conn[0].cookie_out_l);
-            strcpy(res.hdr.cookie_out_l_exp, conn[0].cookie_out_l_exp);
-            strcpy(res.hdr.location, conn[0].location);
-            res.hdr.dont_cache = conn[0].dont_cache;
-            res.hdr.keep_content = conn[0].keep_content;
-
-            res.hdr.rest_status = G_rest_status;
-            res.hdr.rest_req = G_rest_req;          /* only for this async call */
-            res.hdr.rest_elapsed = G_rest_elapsed;  /* only for this async call */
-
             if ( req.hdr.response )
             {
                 DBG_T("Sending response...");
+
+                res.hdr.err_code = G_error_code;
+
+                res.hdr.status = conn[0].status;
+                res.hdr.ctype = conn[0].ctype;
+                strcpy(res.hdr.ctypestr, conn[0].ctypestr);
+                strcpy(res.hdr.cdisp, conn[0].cdisp);
+                strcpy(res.hdr.cookie_out_a, conn[0].cookie_out_a);
+                strcpy(res.hdr.cookie_out_a_exp, conn[0].cookie_out_a_exp);
+                strcpy(res.hdr.cookie_out_l, conn[0].cookie_out_l);
+                strcpy(res.hdr.cookie_out_l_exp, conn[0].cookie_out_l_exp);
+                strcpy(res.hdr.location, conn[0].location);
+                res.hdr.dont_cache = conn[0].dont_cache;
+                res.hdr.keep_content = conn[0].keep_content;
+
+                res.hdr.rest_status = G_rest_status;
+                res.hdr.rest_req = G_rest_req;          /* only for this async call */
+                res.hdr.rest_elapsed = G_rest_elapsed;  /* only for this async call */
+
+                /* user session */
+
                 memcpy(&res.hdr.uses, &uses[1], sizeof(usession_t));
-#ifdef ASYNC_AUSES
+#ifndef ASYNC_EXCLUDE_AUSES
                 memcpy(&res.hdr.auses, &auses[1], sizeof(ausession_t));
 #endif
-                mq_send(G_queue_res, (char*)&res, ASYNC_RES_MSG_SIZE, 0);
+                /* data */
+
+                int data_len, chunk_num=0, data_sent=0;
+#ifdef OUTCHECKREALLOC
+                data_len = p_content - out_data;
+#else
+                data_len = p_content - res.data;
+#endif
+                DBG("data_len = %d", data_len);
+
+                res.hdr.chunk = ASYNC_CHUNK_FIRST;
+
+                if ( data_len < G_async_res_data_size )
+                {
+                    res.hdr.clen = data_len;
+#ifdef OUTCHECKREALLOC
+                    memcpy(res.data, out_data, res.hdr.clen);
+#endif
+                    res.hdr.chunk |= ASYNC_CHUNK_LAST;
+                    data_sent = data_len;
+                }
+#ifdef OUTCHECKREALLOC
+                else    /* we'll need more than one chunk */
+                {
+                    res.hdr.clen = G_async_res_data_size;
+                    memcpy(res.data, out_data, res.hdr.clen);
+                    data_sent = data_len - res.hdr.clen;
+                }
+
+                /* send */
+
+                if ( mq_send(G_queue_res, (char*)&res, ASYNC_RES_MSG_SIZE, 0) != 0 )
+                    ERR("mq_send failed, errno = %d (%s)", errno, strerror(errno));
+
+                while ( data_sent < data_len )
+                {
+                    DBG("Sending %d-th chunk...", ++chunk_num);
+
+                    res.hdr.chunk = chunk_num;
+
+                    if ( data_len-data_sent < G_async_res_data_size )   /* last chunk */
+                    {
+                        res.hdr.clen = data_len - data_sent;
+                        res.hdr.chunk |= ASYNC_CHUNK_LAST;
+                    }
+                    else
+                    {
+                        res.hdr.clen = G_async_res_data_size;
+                    }
+
+                    memcpy(res.data, out_data+data_sent, res.hdr.clen);
+                    data_sent += res.hdr.clen;
+
+                    if ( mq_send(G_queue_res, (char*)&res, ASYNC_RES_MSG_SIZE, 0) != 0 )
+                        ERR("mq_send failed, errno = %d (%s)", errno, strerror(errno));
+                }
+
+#endif  /* OUTCHECKREALLOC */
+
                 DBG("Sent\n");
             }
             else
@@ -5304,6 +5518,80 @@ int main(int argc, char *argv[])
     clean_up();
 
     return EXIT_SUCCESS;
+}
+
+
+/* --------------------------------------------------------------------------
+   Write string to output buffer with buffer overwrite protection
+-------------------------------------------------------------------------- */
+void svc_out_check(const char *str)
+{
+    int available = G_async_res_data_size - (p_content - res.data);
+
+    if ( strlen(str) < available )  /* the whole string will fit */
+    {
+        p_content = stpcpy(p_content, str);
+    }
+    else    /* let's write only what we can. WARNING: no UTF-8 checking is done here! */
+    {
+        p_content = stpncpy(p_content, str, available-1);
+        *p_content = EOS;
+    }
+}
+
+
+/* --------------------------------------------------------------------------
+   Write string to output buffer with buffer resizing if necessary
+-------------------------------------------------------------------------- */
+void svc_out_check_realloc(const char *str)
+{
+    if ( strlen(str) < out_data_allocated - (p_content - out_data) )    /* the whole string will fit */
+    {
+        p_content = stpcpy(p_content, str);
+    }
+    else    /* resize output buffer and try again */
+    {
+        int used = p_content - out_data;
+        char *tmp = (char*)realloc(out_data, out_data_allocated*2);
+        if ( !tmp )
+        {
+            ERR("Couldn't reallocate output buffer, tried %d bytes", out_data_allocated*2);
+            return;
+        }
+        out_data = tmp;
+        out_data_allocated = out_data_allocated * 2;
+        p_content = out_data + used;
+        INF("Reallocated output buffer, new size = %d bytes", out_data_allocated);
+        svc_out_check_realloc(str);     /* call itself! */
+    }
+}
+
+
+/* --------------------------------------------------------------------------
+   Write binary data to output buffer with buffer resizing if necessary
+-------------------------------------------------------------------------- */
+void svc_out_check_realloc_bin(const char *data, int len)
+{
+    if ( len < out_data_allocated - (p_content - out_data) )    /* the whole data will fit */
+    {
+        memcpy(p_content, data, len);
+        p_content += len;
+    }
+    else    /* resize output buffer and try again */
+    {
+        int used = p_content - out_data;
+        char *tmp = (char*)realloc(out_data, out_data_allocated*2);
+        if ( !tmp )
+        {
+            ERR("Couldn't reallocate output buffer, tried %d bytes", out_data_allocated*2);
+            return;
+        }
+        out_data = tmp;
+        out_data_allocated = out_data_allocated * 2;
+        p_content = out_data + used;
+        INF("Reallocated output buffer, new size = %d bytes", out_data_allocated);
+        svc_out_check_realloc_bin(data, len);       /* call itself! */
+    }
 }
 
 
@@ -5359,7 +5647,7 @@ static void clean_up()
         mq_unlink(G_res_queue_name);
     }
 
-    log_finish();
+    silgy_lib_done();
 }
 
 #endif  /* SILGY_SVC */

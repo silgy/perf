@@ -33,12 +33,12 @@ char        G_dt[20]="";                /* datetime for database or log (YYYY-MM
 char        G_tmp[TMP_BUFSIZE];         /* temporary string buffer */
 messages_t  G_messages[MAX_MESSAGES]={0};
 int         G_next_message=0;
+
 #ifdef HTTPS
 bool        G_ssl_lib_initialized=0;
 #endif
-char        *G_shm_segptr=NULL;         /* SHM pointer */
 
-long        G_rest_req=0;               /* REST calls counter */
+int         G_rest_req=0;               /* REST calls counter */
 double      G_rest_elapsed=0;           /* REST calls elapsed for calculating average */
 double      G_rest_average=0;           /* REST calls average elapsed */
 int         G_rest_status;              /* last REST call response status */
@@ -54,7 +54,9 @@ static char M_df=0;                     /* date format */
 static char M_tsep=' ';                 /* thousand separator */
 static char M_dsep='.';                 /* decimal separator */
 
-static int  M_shmid;                    /* SHM id */
+#ifndef _WIN32
+static int  M_shmid[MAX_SHM_SEGMENTS]={0}; /* SHM id-s */
+#endif
 
 static rest_header_t M_rest_headers[REST_MAX_HEADERS];
 static int M_rest_headers_cnt=0;
@@ -90,17 +92,59 @@ static void get_byteorder64(void);
 -------------------------------------------------------------------------- */
 void silgy_lib_init()
 {
+    int i;
+
     DBG("silgy_lib_init");
+
     /* G_pid */
+
     G_pid = getpid();
+
     /* G_appdir */
+
     lib_get_app_dir();
+
     /* time globals */
+
     lib_update_time_globals();
+
     /* log file fd */
+
     M_log_fd = stdout;
+
     /* load error messages */
+
     load_err_messages();
+
+#ifndef _WIN32
+
+    /* SHM segments array */
+
+//    for ( i=0; i<MAX_SHM_SEGMENTS; ++i )
+//        M_shmid[i] = NULL;
+
+#endif  /* _WIN32 */
+
+}
+
+
+/* --------------------------------------------------------------------------
+   Library clean up
+-------------------------------------------------------------------------- */
+void silgy_lib_done()
+{
+    int i;
+
+    DBG("silgy_lib_done");
+
+#ifndef _WIN32
+
+    for ( i=0; i<MAX_SHM_SEGMENTS; ++i )
+        lib_shm_delete(i);
+
+#endif  /* _WIN32 */
+
+    log_finish();
 }
 
 
@@ -4319,11 +4363,11 @@ static unsigned int seeds[SILGY_SEEDS_MEM];
     }
     else    /* subsequent calls */
     {
-        pid_remainder = get_random_number() % 63 + 1;
-        yesterday_rem = get_random_number() % 63 + 1;
+        pid_remainder = rand() % 63 + 1;
+        yesterday_rem = rand() % 63 + 1;
     }
 
-    static int seeded=0;    /* 8 bits */
+static int seeded=0;    /* 8 bits */
 
     unsigned int seed;
 static unsigned int prev_seed=0;
@@ -4371,8 +4415,8 @@ static unsigned int prev_seed=0;
 
         /* stir it up to avoid endless loop */
 
-        pid_remainder = get_random_number() % 63 + 1;
-        time_remainder = get_random_number() % 63 + 1;
+        pid_remainder = rand() % 63 + 1;
+        time_remainder = rand() % 63 + 1;
     }
 
     char f[256];
@@ -6372,54 +6416,71 @@ static char pidfilename[512];
 /* --------------------------------------------------------------------------
    Attach to shared memory segment
 -------------------------------------------------------------------------- */
-bool lib_shm_create(long bytes)
+char *lib_shm_create(long bytes, int index)
 {
+    char *shm_segptr=NULL;
+
+    if ( index >= MAX_SHM_SEGMENTS )
+    {
+        ERR("Too many SHM segments, MAX_SHM_SEGMENTS=%d", MAX_SHM_SEGMENTS);
+        return NULL;
+    }
+
 #ifndef _WIN32
-    key_t key;
 
     /* Create unique key via call to ftok() */
-    key = ftok(".", 'S');
+
+    key_t key;
+    if ( (key=ftok(G_appdir, '0'+(char)index)) == -1 )
+    {
+        ERR("ftok, errno = %d (%s)", errno, strerror(errno));
+        return NULL;
+    }
 
     /* Open the shared memory segment - create if necessary */
-    if ( (M_shmid=shmget(key, bytes, IPC_CREAT|IPC_EXCL|0666)) == -1 )
-    {
-        printf("Shared memory segment exists - opening as client\n");
 
-        /* Segment probably already exists - try as a client */
-        if ( (M_shmid=shmget(key, bytes, 0)) == -1 )
+    if ( (M_shmid[index]=shmget(key, bytes, IPC_CREAT|IPC_EXCL|0600)) == -1 )
+    {
+        INF("Shared memory segment exists - opening as client");
+
+        if ( (M_shmid[index]=shmget(key, bytes, 0)) == -1 )
         {
-            perror("shmget");
-            return FALSE;
+            ERR("shmget, errno = %d (%s)", errno, strerror(errno));
+            return NULL;
         }
     }
     else
     {
-        printf("Creating new shared memory segment\n");
+        INF("Creating new shared memory segment");
     }
 
     /* Attach (map) the shared memory segment into the current process */
-    if ( (G_shm_segptr=(char*)shmat(M_shmid, 0, 0)) == (char*)-1 )
+
+    if ( (shm_segptr=(char*)shmat(M_shmid[index], 0, 0)) == (char*)-1 )
     {
-        perror("shmat");
-        return FALSE;
+        ERR("shmat, errno = %d (%s)", errno, strerror(errno));
+        return NULL;
     }
-#endif
-    return TRUE;
+
+#endif  /* _WIN32 */
+
+    return shm_segptr;
 }
 
 
 /* --------------------------------------------------------------------------
    Delete shared memory segment
 -------------------------------------------------------------------------- */
-void lib_shm_delete(long bytes)
+void lib_shm_delete(int index)
 {
 #ifndef _WIN32
-    if ( lib_shm_create(bytes) )
+    if ( M_shmid[index] )
     {
-        shmctl(M_shmid, IPC_RMID, 0);
-        printf("Shared memory segment marked for deletion\n");
+        shmctl(M_shmid[index], IPC_RMID, 0);
+        M_shmid[index] = 0;
+        INF("Shared memory segment (index=%d) marked for deletion", index);
     }
-#endif
+#endif  /* _WIN32 */
 }
 
 
