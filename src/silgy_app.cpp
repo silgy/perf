@@ -92,7 +92,7 @@ void sendreqs(int ci)
     INF("URL [%s]", AUS.url);
     INF("times = %d", AUS.times);
 
-    CALL_ASYNC_TM("sendreqs", NULL, 600);   // 10 minutes timeout
+    CALL_ASYNC_TM("sendreqs", 600);   // 10 minutes timeout
 }
 
 
