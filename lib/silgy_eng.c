@@ -2303,7 +2303,7 @@ static void accept_https()
 
                 if ( conn[i].ssl_err != SSL_ERROR_WANT_READ && conn[i].ssl_err != SSL_ERROR_WANT_WRITE )
                 {
-                    ERR("SSL_accept failed, ssl_err = %d", conn[i].ssl_err);
+                    DBG("SSL_accept failed, ssl_err = %d", conn[i].ssl_err);
                     close_conn(i);
                     return;
                 }
@@ -3249,7 +3249,7 @@ static void gen_response_header(int ci)
 #ifndef _WIN32  /* just too much headache */
         if ( conn[ci].static_res==NOT_STATIC && conn[ci].clen > COMPRESS_TRESHOLD && conn[ci].accept_deflate && (conn[ci].ctype==RES_HTML || conn[ci].ctype==RES_TEXT || conn[ci].ctype==RES_JSON || conn[ci].ctype==RES_BMP) && !UA_IE )
         {
-            INF("Compressing content");
+            DBG("Compressing content");
 
             int ret;
 static z_stream strm;
@@ -3283,7 +3283,7 @@ static bool first=TRUE;
 
             if ( ret == Z_OK )
             {
-                INF("Compression success, old len=%u, new len=%u", conn[ci].clen, max);
+                DBG("Compression success, old len=%u, new len=%u", conn[ci].clen, max);
                 conn[ci].clen = max;
                 PRINT_HTTP_CONTENT_ENCODING_DEFLATE;
             }
@@ -3791,7 +3791,7 @@ static int parse_req(int ci, int len)
             }
             else
             {
-                ERR("Method [%s] not allowed, ignoring", conn[ci].method);
+                WAR("Method [%s] not allowed, ignoring", conn[ci].method);
                 return 405;
             }
 
@@ -3929,7 +3929,7 @@ static int parse_req(int ci, int len)
 
             if ( j == MAX_VALUE_LEN )   /* truncate here */
             {
-                WAR("Truncating %s's value", label);
+                DBG("Truncating %s's value", label);
                 value[j] = EOS;
 #ifdef DUMP
                 DBG("value: [%s]", value);
