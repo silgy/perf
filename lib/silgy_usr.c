@@ -19,7 +19,6 @@ long     G_new_user_id=0;
 static bool valid_username(const char *login);
 static bool valid_email(const char *email);
 static int  upgrade_uses(int ci, long uid, const char *login, const char *email, const char *name, const char *phone, const char *about, short auth_level);
-static void downgrade_uses(int usi, int ci, bool usr_logout);
 static int  user_exists(const char *login);
 static int  email_exists(const char *email);
 static int  do_login(int ci, long uid, char *p_login, char *p_email, char *p_name, char *p_phone, char *p_about, short p_auth_level, long visits, short status);
@@ -150,7 +149,7 @@ static int upgrade_uses(int ci, long uid, const char *login, const char *email, 
 #ifndef SILGY_SVC
     if ( !silgy_app_user_login(ci) )
     {
-        downgrade_uses(conn[ci].usi, ci, FALSE);
+        libusr_luses_downgrade(conn[ci].usi, ci, FALSE);
         return ERR_INT_SERVER_ERROR;
     }
 #endif
@@ -209,10 +208,10 @@ int libusr_luses_ok(int ci)
 
     /* not found in memory -- try database */
 
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    unsigned long sql_records;
+    MYSQL_ROW   row;
+    unsigned    records;
     long        uid;
     time_t      created;
 
@@ -222,24 +221,24 @@ int libusr_luses_ok(int ci)
     char sanlscookie[SESID_LEN+1];
     sanitize_sql(sanlscookie, conn[ci].cookie_in_l, SESID_LEN);
 
-    sprintf(sql_query, "SELECT uagent, user_id, created FROM users_logins WHERE sesid = BINARY '%s'", sanlscookie);
-    DBG("sql_query: %s", sql_query);
+    sprintf(sql, "SELECT uagent, user_id, created FROM users_logins WHERE sesid = BINARY '%s'", sanlscookie);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    DBG("users_logins: %lu record(s) found", sql_records);
+    DBG("users_logins: %u record(s) found", records);
 
-    if ( 0 == sql_records )     /* no such session in database */
+    if ( 0 == records )     /* no such session in database */
     {
         mysql_free_result(result);
         WAR("No logged in session in database [%s]", sanlscookie);
@@ -264,12 +263,8 @@ int libusr_luses_ok(int ci)
                     || (failed_cnt[i].cnt > 100 && failed_cnt[i].when > G_now-3600) /* 100 failed attempts within an hour or */
                     || failed_cnt[i].cnt > 1000 )                                   /* 1000 failed attempts */
                 {
-#ifndef SILGY_SVC
                     WAR("Looks like brute-force cookie attack, blocking IP");
                     eng_block_ip(conn[ci].ip, TRUE);
-#else
-                    WAR("Looks like brute-force cookie attack");
-#endif  /* SILGY_SVC */
                 }
                 else
                 {
@@ -305,11 +300,11 @@ int libusr_luses_ok(int ci)
 
     /* we've got some user login cookie remembered */
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
     /* verify uagent */
 
-    if ( 0 != strcmp(sanuagent, sql_row[0]) )
+    if ( 0 != strcmp(sanuagent, row[0]) )
     {
         mysql_free_result(result);
         DBG("Different uagent in database for sesid [%s]", sanlscookie);
@@ -320,24 +315,24 @@ int libusr_luses_ok(int ci)
 
     /* -------------------------------------- */
 
-    uid = atol(sql_row[1]);
+    uid = atol(row[1]);
 
-    /* Verify time. If created more than 30 days ago -- refuse */
+    /* Verify time. If created more than USER_KEEP_LOGGED_DAYS ago -- refuse */
 
-    created = db2epoch(sql_row[2]);
+    created = db2epoch(row[2]);
 
-    if ( created < G_now - 3600*24*30 )
+    if ( created < G_now - 3600*24*USER_KEEP_LOGGED_DAYS )
     {
-        DBG("Removing old logged in session, usi=%d, sesid [%s], created %s from database", conn[ci].usi, sanlscookie, sql_row[2]);
+        DBG("Removing old logged in session, usi=%d, sesid [%s], created %s from database", conn[ci].usi, sanlscookie, row[2]);
 
         mysql_free_result(result);
 
-        sprintf(sql_query, "DELETE FROM users_logins WHERE sesid = BINARY '%s'", sanlscookie);
-        DBG("sql_query: %s", sql_query);
+        sprintf(sql, "DELETE FROM users_logins WHERE sesid = BINARY '%s'", sanlscookie);
+        DBG("sql: %s", sql);
 
-        if ( mysql_query(G_dbconn, sql_query) )
+        if ( mysql_query(G_dbconn, sql) )
         {
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
             return ERR_INT_SERVER_ERROR;
         }
 
@@ -362,17 +357,16 @@ int libusr_luses_ok(int ci)
     if ( ret != OK )
         return ret;
 
-    sprintf(sql_query, "UPDATE users_logins SET last_used='%s' WHERE sesid = BINARY '%s'", G_dt, US.sesid);
-    DBG("sql_query: %s", sql_query);
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "UPDATE users_logins SET last_used='%s' WHERE sesid = BINARY '%s'", G_dt, US.sesid);
+    DBG("sql: %s", sql);
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
     return do_login(ci, uid, NULL, NULL, NULL, NULL, NULL, 0, 0, 0);
 }
-#endif  /* SILGY_SVC */
 
 
 /* --------------------------------------------------------------------------
@@ -388,46 +382,20 @@ void libusr_luses_close_timeouted()
     for ( i=1; G_sessions>0 && i<=MAX_SESSIONS; ++i )
     {
         if ( uses[i].sesid[0] && uses[i].logged && uses[i].last_activity < last_allowed )
-            downgrade_uses(i, NOT_CONNECTED, FALSE);
+            libusr_luses_downgrade(i, NOT_CONNECTED, FALSE);
     }
 }
-
-
-/* --------------------------------------------------------------------------
-   Invalidate active user sessions belonging to user_id
-   Called after password change
--------------------------------------------------------------------------- */
-static void downgrade_uses_by_uid(long uid, int ci)
-{
-    int i;
-
-    if ( ci > -1 )  /* keep the current session */
-    {
-        for ( i=1; G_sessions>0 && i<=MAX_SESSIONS; ++i )
-        {
-            if ( uses[i].sesid[0] && uses[i].logged && uses[i].uid==uid && 0!=strcmp(uses[i].sesid, US.sesid) )
-                downgrade_uses(i, NOT_CONNECTED, FALSE);
-        }
-    }
-    else    /* all sessions */
-    {
-        for ( i=1; G_sessions>0 && i<=MAX_SESSIONS; ++i )
-        {
-            if ( uses[i].sesid[0] && uses[i].logged && uses[i].uid==uid )
-                downgrade_uses(i, NOT_CONNECTED, FALSE);
-        }
-    }
-}
+#endif  /* SILGY_SVC */
 
 
 /* --------------------------------------------------------------------------
    Downgrade logged in user session to anonymous
 -------------------------------------------------------------------------- */
-static void downgrade_uses(int usi, int ci, bool usr_logout)
+void libusr_luses_downgrade(int usi, int ci, bool usr_logout)
 {
-    char sql_query[SQLBUF];
+    char sql[SQLBUF];
 
-    DBG("downgrade_uses");
+    DBG("libusr_luses_downgrade");
 
     DBG("Downgrading logged in session to anonymous, usi=%d, sesid [%s]", usi, uses[usi].sesid);
 
@@ -445,26 +413,24 @@ static void downgrade_uses(int usi, int ci, bool usr_logout)
     uses[usi].about_tmp[0] = EOS;
     uses[usi].auth_level = AUTH_LEVEL_ANONYMOUS;
 
+#ifndef SILGY_SVC
     if ( ci != NOT_CONNECTED )   /* still connected */
     {
-#ifndef SILGY_SVC
         silgy_app_user_logout(ci);
-#endif
     }
     else    /* trick to maintain consistency across silgy_app_xxx functions */
     {       /* that use ci for everything -- even to get user session data */
         conn[CLOSING_SESSION_CI].usi = usi;
-#ifndef SILGY_SVC
         silgy_app_user_logout(CLOSING_SESSION_CI);
-#endif
     }
+#endif  /* SILGY_SVC */
 
     if ( usr_logout )   /* explicit user logout */
     {
-        sprintf(sql_query, "DELETE FROM users_logins WHERE sesid = BINARY '%s'", uses[usi].sesid);
-        DBG("sql_query: %s", sql_query);
-        if ( mysql_query(G_dbconn, sql_query) )
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        sprintf(sql, "DELETE FROM users_logins WHERE sesid = BINARY '%s'", uses[usi].sesid);
+        DBG("sql: %s", sql);
+        if ( mysql_query(G_dbconn, sql) )
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
 
         if ( ci != NOT_CONNECTED )   /* still connected */
         {
@@ -482,32 +448,32 @@ static void downgrade_uses(int usi, int ci, bool usr_logout)
 -------------------------------------------------------------------------- */
 static int user_exists(const char *login)
 {
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    long        records;
+    unsigned    records;
 
     DBG("user_exists, login [%s]", login);
 
 //  if ( 0==strcmp(sanlogin, "ADMIN") )
 //      return ERR_USERNAME_TAKEN;
 
-    sprintf(sql_query, "SELECT id FROM users WHERE login_u='%s'", upper(login));
+    sprintf(sql, "SELECT id FROM users WHERE login_u='%s'", upper(login));
 
-    DBG("sql_query: %s", sql_query);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
     records = mysql_num_rows(result);
 
-    DBG("users: %ld record(s) found", records);
+    DBG("users: %u record(s) found", records);
 
     mysql_free_result(result);
 
@@ -523,29 +489,29 @@ static int user_exists(const char *login)
 -------------------------------------------------------------------------- */
 static int email_exists(const char *email)
 {
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    long        records;
+    unsigned    records;
 
     DBG("email_exists, email [%s]", email);
 
-    sprintf(sql_query, "SELECT id FROM users WHERE email_u='%s'", upper(email));
+    sprintf(sql, "SELECT id FROM users WHERE email_u='%s'", upper(email));
 
-    DBG("sql_query: %s", sql_query);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
     records = mysql_num_rows(result);
 
-    DBG("users: %ld record(s) found", records);
+    DBG("users: %u record(s) found", records);
 
     mysql_free_result(result);
 
@@ -563,10 +529,10 @@ static int email_exists(const char *email)
 static int do_login(int ci, long uid, char *p_login, char *p_email, char *p_name, char *p_phone, char *p_about, short p_auth_level, long visits, short status)
 {
     int         ret=OK;
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    unsigned long sql_records;
+    MYSQL_ROW   row;
+    unsigned    records;
     char        login[LOGIN_LEN+1];
     char        email[EMAIL_LEN+1];
     char        name[UNAME_LEN+1];
@@ -580,21 +546,21 @@ static int do_login(int ci, long uid, char *p_login, char *p_email, char *p_name
 
     if ( !p_login )   /* login from cookie */
     {
-        sprintf(sql_query, "SELECT login,email,name,phone,about,auth_level,visits FROM users WHERE id=%ld", uid);
-        DBG("sql_query: %s", sql_query);
-        mysql_query(G_dbconn, sql_query);
+        sprintf(sql, "SELECT login,email,name,phone,about,auth_level,visits FROM users WHERE id=%ld", uid);
+        DBG("sql: %s", sql);
+        mysql_query(G_dbconn, sql);
         result = mysql_store_result(G_dbconn);
         if ( !result )
         {
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
             return ERR_INT_SERVER_ERROR;
         }
 
-        sql_records = mysql_num_rows(result);
+        records = mysql_num_rows(result);
 
-        DBG("users: %lu record(s) found", sql_records);
+        DBG("users: %u record(s) found", records);
 
-        if ( 0 == sql_records )
+        if ( 0 == records )
         {
             mysql_free_result(result);
             WAR("Cookie sesid does not match user id");
@@ -603,15 +569,15 @@ static int do_login(int ci, long uid, char *p_login, char *p_email, char *p_name
 
         /* user found */
 
-        sql_row = mysql_fetch_row(result);
+        row = mysql_fetch_row(result);
 
-        strcpy(login, sql_row[0]?sql_row[0]:"");
-        strcpy(email, sql_row[1]?sql_row[1]:"");
-        strcpy(name, sql_row[2]?sql_row[2]:"");
-        strcpy(phone, sql_row[3]?sql_row[3]:"");
-        strcpy(about, sql_row[4]?sql_row[4]:"");
-        auth_level = sql_row[5]?atoi(sql_row[5]):DEF_USER_AUTH_LEVEL;
-        visits = atol(sql_row[6]);
+        strcpy(login, row[0]?row[0]:"");
+        strcpy(email, row[1]?row[1]:"");
+        strcpy(name, row[2]?row[2]:"");
+        strcpy(phone, row[3]?row[3]:"");
+        strcpy(about, row[4]?row[4]:"");
+        auth_level = row[5]?atoi(row[5]):DEF_USER_AUTH_LEVEL;
+        visits = atol(row[6]);
 
         mysql_free_result(result);
     }
@@ -625,14 +591,6 @@ static int do_login(int ci, long uid, char *p_login, char *p_email, char *p_name
         auth_level = p_auth_level;
     }
 
-    /* admin? */
-#ifdef USERSBYEMAIL
-#ifdef APP_ADMIN_EMAIL
-    if ( 0==strcmp(email, APP_ADMIN_EMAIL) )
-        strcpy(login, "admin");
-#endif
-#endif  /* USERSBYEMAIL */
-
     /* upgrade anonymous session to logged in */
 
     ret = upgrade_uses(ci, uid, login, email, name, phone, about, auth_level);
@@ -641,11 +599,11 @@ static int do_login(int ci, long uid, char *p_login, char *p_email, char *p_name
 
     /* update user record */
 
-    sprintf(sql_query, "UPDATE users SET visits=%ld, last_login='%s' WHERE id=%ld", visits+1, G_dt, uid);
-    DBG("sql_query: %s", sql_query);
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "UPDATE users SET visits=%ld, last_login='%s' WHERE id=%ld", visits+1, G_dt, uid);
+    DBG("sql: %s", sql);
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
@@ -673,18 +631,18 @@ static int do_login(int ci, long uid, char *p_login, char *p_email, char *p_name
 static int send_activation_link(int ci, const char *login, const char *email)
 {
     char linkkey[PASSWD_RESET_KEY_LEN+1];
-    char sql_query[SQLBUF];
+    char sql[SQLBUF];
     
     /* generate the key */
 
     silgy_random(linkkey, PASSWD_RESET_KEY_LEN);
 
-    sprintf(sql_query, "INSERT INTO users_activations (linkkey,user_id,created,activated) VALUES ('%s',%ld,'%s','N')", linkkey, US.uid, G_dt);
-    DBG("sql_query: %s", sql_query);
+    sprintf(sql, "INSERT INTO users_activations (linkkey,user_id,created,activated) VALUES ('%s',%ld,'%s','N')", linkkey, US.uid, G_dt);
+    DBG("sql: %s", sql);
 
-    if ( mysql_query(G_dbconn, sql_query) )
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
@@ -736,10 +694,10 @@ static int send_activation_link(int ci, const char *login, const char *email)
 -------------------------------------------------------------------------- */
 static int silgy_usr_verify_activation_key(int ci, char *linkkey, long *uid)
 {
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    unsigned long sql_records;
+    MYSQL_ROW   row;
+    unsigned    records;
     QSVAL       esc_linkkey;
 
     DBG("silgy_usr_verify_activation_key");
@@ -749,34 +707,34 @@ static int silgy_usr_verify_activation_key(int ci, char *linkkey, long *uid)
 
     strcpy(esc_linkkey, silgy_sql_esc(linkkey));
 
-    sprintf(sql_query, "SELECT user_id, created, activated FROM users_activations WHERE linkkey = BINARY '%s'", esc_linkkey);
-    DBG("sql_query: %s", sql_query);
+    sprintf(sql, "SELECT user_id, created, activated FROM users_activations WHERE linkkey = BINARY '%s'", esc_linkkey);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    DBG("users_activations: %lu row(s) found", sql_records);
+    DBG("users_activations: %u row(s) found", records);
 
-    if ( !sql_records )     /* no records with this key in users_activations -- link broken? */
+    if ( !records )     /* no records with this key in users_activations -- link broken? */
     {
         mysql_free_result(result);
         return ERR_LINK_MAY_BE_EXPIRED;
     }
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
     /* already activated? */
 
-    if ( sql_row[2] && sql_row[2][0]=='Y' )
+    if ( row[2] && row[2][0]=='Y' )
     {
         mysql_free_result(result);
         DBG("User already activated");
@@ -785,7 +743,7 @@ static int silgy_usr_verify_activation_key(int ci, char *linkkey, long *uid)
 
     /* validate expiry time */
 
-    if ( db2epoch(sql_row[1]) < G_now-3600*USER_ACTIVATION_HOURS )
+    if ( db2epoch(row[1]) < G_now-3600*USER_ACTIVATION_HOURS )
     {
         WAR("Key created more than %d hours ago", USER_ACTIVATION_HOURS);
         mysql_free_result(result);
@@ -796,7 +754,7 @@ static int silgy_usr_verify_activation_key(int ci, char *linkkey, long *uid)
 
     /* get the user id */
 
-    *uid = atol(sql_row[0]);
+    *uid = atol(row[0]);
 
     mysql_free_result(result);
 
@@ -834,26 +792,26 @@ int silgy_usr_login(int ci)
     QSVAL       passwd;
     QSVAL       keep;
     char        ulogin[MAX_VALUE_LEN*2+1];
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     char        p1[32], p2[32];
     char        str1[32], str2[32];
     int         ula_cnt;
     char        ula_time[32];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    unsigned long sql_records;
+    MYSQL_ROW   row;
+    unsigned    records;
     long        uid;
     int         new_ula_cnt;
     long        visits;
 
     DBG("silgy_usr_login");
 
-#ifdef SILGY_SVC
+//#ifdef SILGY_SVC
 
-    ERR("silgy_usr_login() is not currently supported in silgy_svc. Move this call do silgy_app.");
-    return ERR_INT_SERVER_ERROR;
+//    ERR("silgy_usr_login() is not currently supported in silgy_svc. Move this call do silgy_app.");
+//    return ERR_INT_SERVER_ERROR;
 
-#else
+//#else
 
 #ifdef USERSBYEMAIL
 
@@ -863,7 +821,7 @@ int silgy_usr_login(int ci)
         return ERR_INVALID_REQUEST;
     }
     stp_right(email);
-    sprintf(sql_query, "SELECT id,login,email,name,phone,passwd1,passwd2,about,auth_level,status,ula_time,ula_cnt,visits FROM users WHERE email_u='%s'", upper(email));
+    sprintf(sql, "SELECT id,login,email,name,phone,passwd1,passwd2,about,auth_level,status,ula_time,ula_cnt,visits FROM users WHERE email_u='%s'", upper(email));
 
 #else    /* by login */
 
@@ -874,27 +832,27 @@ int silgy_usr_login(int ci)
     }
     stp_right(login);
     strcpy(ulogin, upper(login));
-    sprintf(sql_query, "SELECT id,login,email,name,phone,passwd1,passwd2,about,auth_level,status,ula_time,ula_cnt,visits FROM users WHERE (login_u='%s' OR email_u='%s')", ulogin, ulogin);
+    sprintf(sql, "SELECT id,login,email,name,phone,passwd1,passwd2,about,auth_level,status,ula_time,ula_cnt,visits FROM users WHERE (login_u='%s' OR email_u='%s')", ulogin, ulogin);
 
 #endif  /* USERSBYEMAIL */
 
-    DBG("sql_query: %s", sql_query);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    DBG("users: %lu record(s) found", sql_records);
+    DBG("users: %u record(s) found", records);
 
-    if ( 0 == sql_records )     /* no records */
+    if ( 0 == records )     /* no records */
     {
         mysql_free_result(result);
         return ERR_INVALID_LOGIN;   /* invalid user and/or password */
@@ -902,21 +860,21 @@ int silgy_usr_login(int ci)
 
     /* user name found */
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
-    uid = atol(sql_row[0]);
-    strcpy(login, sql_row[1]?sql_row[1]:"");
-    strcpy(email, sql_row[2]?sql_row[2]:"");
-    strcpy(name, sql_row[3]?sql_row[3]:"");
-    strcpy(phone, sql_row[4]?sql_row[4]:"");
-    strcpy(p1, sql_row[5]);
-    strcpy(p2, sql_row[6]);
-    strcpy(about, sql_row[7]?sql_row[7]:"");
-    auth_level = sql_row[8]?atoi(sql_row[8]):DEF_USER_AUTH_LEVEL;
-    status = sql_row[9]?atoi(sql_row[9]):USER_STATUS_ACTIVE;
-    strcpy(ula_time, sql_row[10]?sql_row[10]:"");
-    ula_cnt = atoi(sql_row[11]);
-    visits = atol(sql_row[12]);
+    uid = atol(row[0]);
+    strcpy(login, row[1]?row[1]:"");
+    strcpy(email, row[2]?row[2]:"");
+    strcpy(name, row[3]?row[3]:"");
+    strcpy(phone, row[4]?row[4]:"");
+    strcpy(p1, row[5]);
+    strcpy(p2, row[6]);
+    strcpy(about, row[7]?row[7]:"");
+    auth_level = row[8]?atoi(row[8]):DEF_USER_AUTH_LEVEL;
+    status = row[9]?atoi(row[9]):USER_STATUS_ACTIVE;
+    strcpy(ula_time, row[10]?row[10]:"");
+    ula_cnt = atoi(row[11]);
+    visits = atol(row[12]);
 
     mysql_free_result(result);
 
@@ -944,10 +902,10 @@ int silgy_usr_login(int ci)
         {
             WAR("ula_cnt > MAX_ULA_BEFORE_LOCK (%d) => locking user account", MAX_ULA_BEFORE_LOCK);
 
-            sprintf(sql_query, "UPDATE users SET status=%d WHERE id=%ld", USER_STATUS_LOCKED, uid);
-            DBG("sql_query: %s", sql_query);
-            if ( mysql_query(G_dbconn, sql_query) )
-                ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            sprintf(sql, "UPDATE users SET status=%d WHERE id=%ld", USER_STATUS_LOCKED, uid);
+            DBG("sql: %s", sql);
+            if ( mysql_query(G_dbconn, sql) )
+                ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
 
             if ( email[0] )   /* notify account owner */
             {
@@ -1017,11 +975,11 @@ int silgy_usr_login(int ci)
     {
         DBG("Invalid password");
         new_ula_cnt = ula_cnt + 1;
-        sprintf(sql_query, "UPDATE users SET ula_cnt=%d, ula_time='%s' WHERE id=%ld", new_ula_cnt, G_dt, uid);
-        DBG("sql_query: %s", sql_query);
-        if ( mysql_query(G_dbconn, sql_query) )
+        sprintf(sql, "UPDATE users SET ula_cnt=%d, ula_time='%s' WHERE id=%ld", new_ula_cnt, G_dt, uid);
+        DBG("sql: %s", sql);
+        if ( mysql_query(G_dbconn, sql) )
         {
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
             return ERR_INT_SERVER_ERROR;
         }
         return ERR_INVALID_LOGIN;   /* invalid user and/or password */
@@ -1044,11 +1002,11 @@ int silgy_usr_login(int ci)
     if ( ula_cnt )   /* clear it */
     {
         DBG("Clearing ula_cnt");
-        sprintf(sql_query, "UPDATE users SET ula_cnt=0 WHERE id=%ld", uid);
-        DBG("sql_query: %s", sql_query);
-        if ( mysql_query(G_dbconn, sql_query) )
+        sprintf(sql, "UPDATE users SET ula_cnt=0 WHERE id=%ld", uid);
+        DBG("sql: %s", sql);
+        if ( mysql_query(G_dbconn, sql) )
         {
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
             return ERR_INT_SERVER_ERROR;
         }
     }
@@ -1073,11 +1031,11 @@ int silgy_usr_login(int ci)
     char sanuagent[DB_UAGENT_LEN+1];
     sanitize_sql(sanuagent, conn[ci].uagent, DB_UAGENT_LEN);
 
-    sprintf(sql_query, "INSERT INTO users_logins (sesid,uagent,ip,user_id,created,last_used) VALUES ('%s','%s','%s',%ld,'%s','%s')", US.sesid, sanuagent, conn[ci].ip, uid, G_dt, G_dt);
-    DBG("sql_query: %s", sql_query);
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "INSERT INTO users_logins (sesid,uagent,ip,user_id,created,last_used) VALUES ('%s','%s','%s',%ld,'%s','%s')", US.sesid, sanuagent, conn[ci].ip, uid, G_dt, G_dt);
+    DBG("sql: %s", sql);
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         if ( mysql_errno(G_dbconn) != 1062 )    /* duplicate entry */
             return ERR_INT_SERVER_ERROR;
     }
@@ -1096,7 +1054,6 @@ int silgy_usr_login(int ci)
         time_t sometimeahead = G_now + 3600*24*USER_KEEP_LOGGED_DAYS;
         G_ptm = gmtime(&sometimeahead);
         strftime(conn[ci].cookie_out_l_exp, 32, "%a, %d %b %Y %T GMT", G_ptm);
-//      DBG("conn[ci].cookie_out_l_exp: [%s]", conn[ci].cookie_out_l_exp);
         G_ptm = gmtime(&G_now);  /* make sure G_ptm is always up to date */
     }
 
@@ -1104,7 +1061,7 @@ int silgy_usr_login(int ci)
 
     return do_login(ci, uid, login, email, name, phone, about, auth_level, visits, status);
 
-#endif  /* SILGY_SVC */
+//#endif  /* SILGY_SVC */
 }
 
 
@@ -1124,7 +1081,7 @@ static int create_account(int ci, short auth_level, short status, bool current_s
     QSVAL   passwd;
     QSVAL   rpasswd;
     QSVAL   message="";
-    char    sql_query[SQLBUF];
+    char    sql[SQLBUF];
     char    str1[32], str2[32];
 
     DBG("create_account");
@@ -1240,13 +1197,13 @@ static int create_account(int ci, short auth_level, short status, bool current_s
     strcpy(login_u, upper(login));
     strcpy(email_u, upper(email));
 
-    sprintf(sql_query, "INSERT INTO users (id,login,login_u,email,email_u,name,phone,passwd1,passwd2,about,auth_level,status,created,visits,ula_cnt) VALUES (0,'%s','%s','%s','%s','%s','%s','%s','%s','%s',%hd,%hd,'%s',0,0)", login, login_u, email, email_u, name, phone, str1, str2, about, auth_level, status, G_dt);
+    sprintf(sql, "INSERT INTO users (id,login,login_u,email,email_u,name,phone,passwd1,passwd2,about,auth_level,status,created,visits,ula_cnt) VALUES (0,'%s','%s','%s','%s','%s','%s','%s','%s','%s',%hd,%hd,'%s',0,0)", login, login_u, email, email_u, name, phone, str1, str2, about, auth_level, status, G_dt);
 
-    DBG("sql_query: INSERT INTO users (id,login,email,name,phone,...) VALUES (0,'%s','%s','%s','%s',...)", login, email, name, phone);
+    DBG("sql: INSERT INTO users (id,login,email,name,phone,...) VALUES (0,'%s','%s','%s','%s',...)", login, email, name, phone);
 
-    if ( mysql_query(G_dbconn, sql_query) )
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
@@ -1359,7 +1316,7 @@ int silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email
     {
         QSVAL login_u;
         QSVAL email_u;
-        char sql_query[SQLBUF];
+        char sql[SQLBUF];
         char str1[32], str2[32];
 
         /* --------------------------------------------------------------- */
@@ -1398,13 +1355,13 @@ int silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email
         strcpy(login_u, upper(login));
         strcpy(email_u, upper(email));
 
-        sprintf(sql_query, "INSERT INTO users (id,login,login_u,email,email_u,name,phone,passwd1,passwd2,about,auth_level,status,created,visits,ula_cnt) VALUES (0,'%s','%s','%s','%s','%s','%s','%s','%s','%s',%hd,%hd,'%s',0,0)", login, login_u, email, email_u, name?name:"", phone?phone:"", str1, str2, about?about:"", auth_level, USER_STATUS_PASSWORD_CHANGE, G_dt);
+        sprintf(sql, "INSERT INTO users (id,login,login_u,email,email_u,name,phone,passwd1,passwd2,about,auth_level,status,created,visits,ula_cnt) VALUES (0,'%s','%s','%s','%s','%s','%s','%s','%s','%s',%hd,%hd,'%s',0,0)", login, login_u, email, email_u, name?name:"", phone?phone:"", str1, str2, about?about:"", auth_level, USER_STATUS_PASSWORD_CHANGE, G_dt);
 
-        DBG("sql_query: INSERT INTO users (id,login,email,name,phone,...) VALUES (0,'%s','%s','%s','%s',...)", login, email, name?name:"", phone?phone:"");
+        DBG("sql: INSERT INTO users (id,login,email,name,phone,...) VALUES (0,'%s','%s','%s','%s',...)", login, email, name?name:"", phone?phone:"");
 
-        if ( mysql_query(G_dbconn, sql_query) )
+        if ( mysql_query(G_dbconn, sql) )
         {
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
             return ERR_INT_SERVER_ERROR;
         }
 
@@ -1451,7 +1408,7 @@ int silgy_usr_send_message(int ci)
 
     QSVAL   email;
 static char sanmessage[MAX_LONG_URI_VAL_LEN*2];
-static char sql_query[MAX_LONG_URI_VAL_LEN*2];
+static char sql[MAX_LONG_URI_VAL_LEN*2];
 
     if ( QS_HTML_ESCAPE("email", email) )
         stp_right(email);
@@ -1464,12 +1421,12 @@ static char sql_query[MAX_LONG_URI_VAL_LEN*2];
     if ( conn[ci].usi )
         strcpy(US.email_tmp, email);
 
-    sprintf(sql_query, "INSERT INTO users_messages (user_id,msg_id,email,message,created) VALUES (%ld,%ld,'%s','%s','%s')", US.uid, get_max(ci, "messages")+1, email, sanmessage, G_dt);
-    DBG("sql_query: INSERT INTO users_messages (user_id,msg_id,email,...) VALUES (%ld,get_max(),'%s',...)", US.uid, email);
+    sprintf(sql, "INSERT INTO users_messages (user_id,msg_id,email,message,created) VALUES (%ld,%ld,'%s','%s','%s')", US.uid, get_max(ci, "messages")+1, email, sanmessage, G_dt);
+    DBG("sql: INSERT INTO users_messages (user_id,msg_id,email,...) VALUES (%ld,get_max(),'%s',...)", US.uid, email);
 
-    if ( mysql_query(G_dbconn, sql_query) )
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
@@ -1503,11 +1460,11 @@ int silgy_usr_save_account(int ci)
     QSVAL       strdelconf;
     QSVAL       save;
     int         plen;
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     char        str1[32], str2[32];
     MYSQL_RES   *result;
-    unsigned long sql_records;
-    MYSQL_ROW   sql_row;
+    unsigned    records;
+    MYSQL_ROW   row;
 
     DBG("silgy_usr_save_account");
 
@@ -1589,35 +1546,35 @@ int silgy_usr_save_account(int ci)
 
 #ifdef USERSBYEMAIL
     doit(str1, str2, email, email, opasswd);
-    sprintf(sql_query, "SELECT passwd1 FROM users WHERE email_u='%s'", upper(email));
+    sprintf(sql, "SELECT passwd1 FROM users WHERE email_u='%s'", upper(email));
 #else
     doit(str1, str2, login, login, opasswd);
-    sprintf(sql_query, "SELECT passwd1 FROM users WHERE login_u='%s'", upper(login));
+    sprintf(sql, "SELECT passwd1 FROM users WHERE login_u='%s'", upper(login));
 #endif  /* USERSBYEMAIL */
-    DBG("sql_query: %s", sql_query);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    if ( 0 == sql_records )
+    if ( 0 == records )
     {
         ERR("Weird: no such user");
         mysql_free_result(result);
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
-    if ( 0 != strcmp(str1, sql_row[0]) )
+    if ( 0 != strcmp(str1, row[0]) )
     {
         ERR("Invalid old password");
         mysql_free_result(result);
@@ -1636,15 +1593,15 @@ int silgy_usr_save_account(int ci)
             return WAR_BEFORE_DELETE;
         else
         {
-            sprintf(sql_query, "UPDATE users SET status=%d WHERE id=%ld", USER_STATUS_DELETED, US.uid);
-            DBG("sql_query: %s", sql_query);
-            if ( mysql_query(G_dbconn, sql_query) )
+            sprintf(sql, "UPDATE users SET status=%d WHERE id=%ld", USER_STATUS_DELETED, US.uid);
+            DBG("sql: %s", sql);
+            if ( mysql_query(G_dbconn, sql) )
             {
-                ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+                ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
                 return ERR_INT_SERVER_ERROR;
             }
 
-            downgrade_uses(conn[ci].usi, ci, TRUE);   /* log user out */
+            libusr_luses_downgrade(conn[ci].usi, ci, TRUE);   /* log user out */
 
             return MSG_ACCOUNT_DELETED;
         }
@@ -1654,12 +1611,12 @@ int silgy_usr_save_account(int ci)
 
     get_hashes(str1, str2, login, email, plen?passwd:opasswd);
 
-    sprintf(sql_query, "UPDATE users SET login='%s', email='%s', name='%s', phone='%s', passwd1='%s', passwd2='%s', about='%s' WHERE id=%ld", login, email, name, phone, str1, str2, about, US.uid);
-    DBG("sql_query: UPDATE users SET login='%s', email='%s', name='%s', phone='%s',... WHERE id=%ld", login, email, name, phone, US.uid);
+    sprintf(sql, "UPDATE users SET login='%s', email='%s', name='%s', phone='%s', passwd1='%s', passwd2='%s', about='%s' WHERE id=%ld", login, email, name, phone, str1, str2, about, US.uid);
+    DBG("sql: UPDATE users SET login='%s', email='%s', name='%s', phone='%s',... WHERE id=%ld", login, email, name, phone, US.uid);
 
-    if ( mysql_query(G_dbconn, sql_query) )
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
@@ -1677,18 +1634,18 @@ int silgy_usr_save_account(int ci)
     {
         DBG("Password change => invalidating all other session tokens");
 
-        sprintf(sql_query, "DELETE FROM users_logins WHERE user_id = %ld AND sesid != BINARY '%s'", UID, US.sesid);
-        DBG("sql_query: %s", sql_query);
-        if ( mysql_query(G_dbconn, sql_query) )
+        sprintf(sql, "DELETE FROM users_logins WHERE user_id = %ld AND sesid != BINARY '%s'", UID, US.sesid);
+        DBG("sql: %s", sql);
+        if ( mysql_query(G_dbconn, sql) )
         {
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
             return ERR_INT_SERVER_ERROR;
         }
 
         /* downgrade all currently active sessions belonging to this user */
         /* except of the current one */
 
-        downgrade_uses_by_uid(UID, ci);
+        eng_uses_downgrade_by_uid(UID, ci);
     }
 
     return OK;
@@ -1741,25 +1698,25 @@ static char dest[128];
     }
     else if ( uid )
     {
-        char            sql_query[SQLBUF];
+        char            sql[SQLBUF];
         MYSQL_RES       *result;
-        unsigned long   sql_records;
-        MYSQL_ROW       sql_row;
+        unsigned        records;
+        MYSQL_ROW       row;
 
-        sprintf(sql_query, "SELECT login, email, name FROM users WHERE id=%ld", uid);
-        DBG("sql_query: %s", sql_query);
-        mysql_query(G_dbconn, sql_query);
+        sprintf(sql, "SELECT login, email, name FROM users WHERE id=%ld", uid);
+        DBG("sql: %s", sql);
+        mysql_query(G_dbconn, sql);
         result = mysql_store_result(G_dbconn);
         if ( !result )
         {
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
             strcpy(dest, "User");
         }
         else    /* OK */
         {
-            sql_records = mysql_num_rows(result);
+            records = mysql_num_rows(result);
 
-            if ( 0 == sql_records )
+            if ( 0 == records )
             {
                 mysql_free_result(result);
                 strcpy(dest, "User");
@@ -1770,11 +1727,11 @@ static char dest[128];
                 char db_email[128];
                 char db_name[128];
 
-                sql_row = mysql_fetch_row(result);
+                row = mysql_fetch_row(result);
 
-                strcpy(db_login, sql_row[0]?sql_row[0]:"");
-                strcpy(db_email, sql_row[1]?sql_row[1]:"");
-                strcpy(db_name, sql_row[2]?sql_row[2]:"");
+                strcpy(db_login, row[0]?row[0]:"");
+                strcpy(db_email, row[1]?row[1]:"");
+                strcpy(db_name, row[2]?row[2]:"");
 
                 mysql_free_result(result);
 
@@ -1810,10 +1767,10 @@ int silgy_usr_send_passwd_reset_email(int ci)
 {
     QSVAL       email;
     QSVAL       submit;
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    unsigned long sql_records;
-    MYSQL_ROW   sql_row;
+    unsigned    records;
+    MYSQL_ROW   row;
 
     DBG("silgy_usr_send_passwd_reset_email");
 
@@ -1828,21 +1785,21 @@ int silgy_usr_send_passwd_reset_email(int ci)
     if ( !valid_email(email) )      /* invalid email format */
         return ERR_EMAIL_FORMAT;
 
-    sprintf(sql_query, "SELECT id, login, name, status FROM users WHERE email_u='%s'", upper(email));
-    DBG("sql_query: %s", sql_query);
-    mysql_query(G_dbconn, sql_query);
+    sprintf(sql, "SELECT id, login, name, status FROM users WHERE email_u='%s'", upper(email));
+    DBG("sql: %s", sql);
+    mysql_query(G_dbconn, sql);
     result = mysql_store_result(G_dbconn);
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    DBG("users: %lu record(s) found", sql_records);
+    DBG("users: %u record(s) found", records);
 
-    if ( 0 == sql_records )
+    if ( 0 == records )
     {
         mysql_free_result(result);
         WAR("Password reset link requested for non-existent [%s]", email);
@@ -1851,9 +1808,9 @@ int silgy_usr_send_passwd_reset_email(int ci)
 
     /* -------------------------------------------------------------------------- */
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
-    if ( atoi(sql_row[3]) == USER_STATUS_DELETED )
+    if ( atoi(row[3]) == USER_STATUS_DELETED )
     {
         mysql_free_result(result);
         WAR("Password reset link requested for [%s] but user is deleted", email);
@@ -1866,9 +1823,9 @@ int silgy_usr_send_passwd_reset_email(int ci)
     char login[128];
     char name[128];
 
-    uid = atol(sql_row[0]);
-    strcpy(login, sql_row[1]?sql_row[1]:"");
-    strcpy(name, sql_row[2]?sql_row[2]:"");
+    uid = atol(row[0]);
+    strcpy(login, row[1]?row[1]:"");
+    strcpy(name, row[2]?row[2]:"");
 
     mysql_free_result(result);
 
@@ -1879,12 +1836,12 @@ int silgy_usr_send_passwd_reset_email(int ci)
 
     silgy_random(linkkey, PASSWD_RESET_KEY_LEN);
 
-    sprintf(sql_query, "INSERT INTO users_p_resets (linkkey,user_id,created,tries) VALUES ('%s',%ld,'%s',0)", linkkey, uid, G_dt);
-    DBG("sql_query: %s", sql_query);
+    sprintf(sql, "INSERT INTO users_p_resets (linkkey,user_id,created,tries) VALUES ('%s',%ld,'%s',0)", linkkey, uid, G_dt);
+    DBG("sql: %s", sql);
 
-    if ( mysql_query(G_dbconn, sql_query) )
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
@@ -1941,10 +1898,10 @@ int silgy_usr_send_passwd_reset_email(int ci)
 -------------------------------------------------------------------------- */
 int silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid)
 {
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    unsigned long sql_records;
+    MYSQL_ROW   row;
+    unsigned    records;
     char        esc_linkkey[256];
     int         tries;
 
@@ -1955,34 +1912,34 @@ int silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid)
 
     strcpy(esc_linkkey, silgy_sql_esc(linkkey));
 
-    sprintf(sql_query, "SELECT user_id, created, tries FROM users_p_resets WHERE linkkey = BINARY '%s'", esc_linkkey);
-    DBG("sql_query: %s", sql_query);
+    sprintf(sql, "SELECT user_id, created, tries FROM users_p_resets WHERE linkkey = BINARY '%s'", esc_linkkey);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    DBG("users_p_resets: %lu row(s) found", sql_records);
+    DBG("users_p_resets: %u row(s) found", records);
 
-    if ( !sql_records )     /* no records with this key in users_p_resets -- link broken? */
+    if ( !records )     /* no records with this key in users_p_resets -- link broken? */
     {
         mysql_free_result(result);
         return ERR_LINK_MAY_BE_EXPIRED;
     }
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
     /* validate expiry time */
 
-    if ( db2epoch(sql_row[1]) < G_now-3600*24 )  /* older than 24 hours? */
+    if ( db2epoch(row[1]) < G_now-3600*24 )  /* older than 24 hours? */
     {
         WAR("Key created more than 24 hours ago");
         mysql_free_result(result);
@@ -1991,7 +1948,7 @@ int silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid)
 
     /* validate tries */
 
-    tries = atoi(sql_row[2]);
+    tries = atoi(row[2]);
 
     if ( tries > 12 )
     {
@@ -2004,7 +1961,7 @@ int silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid)
 
     /* get the user id */
 
-    *uid = atol(sql_row[0]);
+    *uid = atol(row[0]);
 
     mysql_free_result(result);
 
@@ -2012,11 +1969,11 @@ int silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid)
 
     /* update tries counter */
 
-    sprintf(sql_query, "UPDATE users_p_resets SET tries=%d WHERE linkkey = BINARY '%s'", tries+1, esc_linkkey);
-    DBG("sql_query: %s", sql_query);
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "UPDATE users_p_resets SET tries=%d WHERE linkkey = BINARY '%s'", tries+1, esc_linkkey);
+    DBG("sql: %s", sql);
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
@@ -2032,10 +1989,7 @@ int silgy_usr_activate(int ci)
     int         ret;
     QSVAL       linkkey;
     long        uid;
-    char        sql_query[SQLBUF];
-    MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    unsigned long sql_records;
+    char        sql[SQLBUF];
 
     DBG("silgy_usr_activate");
 
@@ -2052,22 +2006,21 @@ int silgy_usr_activate(int ci)
 
     /* everything's OK -- activate user -------------------- */
 
-    sprintf(sql_query, "UPDATE users SET status=%d WHERE id=%ld", USER_STATUS_ACTIVE, uid);
-    DBG("sql_query: %s", sql_query);
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "UPDATE users SET status=%d WHERE id=%ld", USER_STATUS_ACTIVE, uid);
+    DBG("sql: %s", sql);
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
     /* remove activation link */
 
-//    sprintf(sql_query, "DELETE FROM users_activations WHERE linkkey = BINARY '%s'", linkkey);
-    sprintf(sql_query, "UPDATE users_activations SET activated='Y' WHERE linkkey = BINARY '%s'", linkkey);
-    DBG("sql_query: %s", sql_query);
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "UPDATE users_activations SET activated='Y' WHERE linkkey = BINARY '%s'", linkkey);
+    DBG("sql: %s", sql);
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
 //        return ERR_INT_SERVER_ERROR;  ignore it
     }
 
@@ -2088,11 +2041,11 @@ int silgy_usr_change_password(int ci)
     QSVAL       rpasswd;
     QSVAL       submit;
     long        uid;
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     char        str1[32], str2[32];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    unsigned long sql_records;
+    MYSQL_ROW   row;
+    unsigned    records;
 
     DBG("silgy_usr_change_password");
 
@@ -2108,35 +2061,35 @@ int silgy_usr_change_password(int ci)
 
 #ifdef USERSBYEMAIL
     doit(str1, str2, US.email, US.email, opasswd);
-    sprintf(sql_query, "SELECT passwd1 FROM users WHERE email_u='%s'", upper(US.email));
+    sprintf(sql, "SELECT passwd1 FROM users WHERE email_u='%s'", upper(US.email));
 #else
     doit(str1, str2, US.login, US.login, opasswd);
-    sprintf(sql_query, "SELECT passwd1 FROM users WHERE login_u='%s'", upper(US.login));
+    sprintf(sql, "SELECT passwd1 FROM users WHERE login_u='%s'", upper(US.login));
 #endif  /* USERSBYEMAIL */
-    DBG("sql_query: %s", sql_query);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    if ( 0 == sql_records )
+    if ( 0 == records )
     {
         ERR("Weird: no such user");
         mysql_free_result(result);
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
-    if ( 0 != strcmp(str1, sql_row[0]) )
+    if ( 0 != strcmp(str1, row[0]) )
     {
         ERR("Invalid old password");
         mysql_free_result(result);
@@ -2168,11 +2121,11 @@ int silgy_usr_change_password(int ci)
 
     DBG("Updating users...");
 
-    sprintf(sql_query, "UPDATE users SET passwd1='%s', passwd2='%s', status=%hd WHERE id=%ld", str1, str2, USER_STATUS_ACTIVE, UID);
-    DBG("sql_query: UPDATE users SET passwd1=...");
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "UPDATE users SET passwd1='%s', passwd2='%s', status=%hd WHERE id=%ld", str1, str2, USER_STATUS_ACTIVE, UID);
+    DBG("sql: UPDATE users SET passwd1=...");
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
@@ -2192,11 +2145,11 @@ int silgy_usr_reset_password(int ci)
     QSVAL       rpasswd;
     QSVAL       submit;
     long        uid;
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     char        str1[32], str2[32];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    unsigned long sql_records;
+    MYSQL_ROW   row;
+    unsigned    records;
 
     DBG("silgy_usr_reset_password");
 
@@ -2234,29 +2187,29 @@ int silgy_usr_reset_password(int ci)
 
     /* verify that emails match each other */
 
-    sprintf(sql_query, "SELECT login, email FROM users WHERE id=%ld", uid);
-    DBG("sql_query: %s", sql_query);
-    mysql_query(G_dbconn, sql_query);
+    sprintf(sql, "SELECT login, email FROM users WHERE id=%ld", uid);
+    DBG("sql: %s", sql);
+    mysql_query(G_dbconn, sql);
     result = mysql_store_result(G_dbconn);
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    DBG("users: %lu record(s) found", sql_records);
+    DBG("users: %u record(s) found", records);
 
-    if ( 0 == sql_records )     /* password reset link expired or invalid email */
+    if ( 0 == records )     /* password reset link expired or invalid email */
     {
         mysql_free_result(result);
         return ERR_LINK_EXPIRED;
     }
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
-    if ( 0 != strcmp(sql_row[1], email) )   /* emails different */
+    if ( 0 != strcmp(row[1], email) )   /* emails different */
     {
         mysql_free_result(result);
         return ERR_LINK_EXPIRED;    /* password reset link expired or invalid email */
@@ -2265,17 +2218,17 @@ int silgy_usr_reset_password(int ci)
 
     /* everything's OK -- update password -------------------------------- */
 
-    get_hashes(str1, str2, sql_row[0], email, passwd);
+    get_hashes(str1, str2, row[0], email, passwd);
 
     mysql_free_result(result);
 
     DBG("Updating users...");
 
-    sprintf(sql_query, "UPDATE users SET passwd1='%s', passwd2='%s' WHERE id=%ld", str1, str2, uid);
-    DBG("sql_query: UPDATE users SET passwd1=...");
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "UPDATE users SET passwd1='%s', passwd2='%s' WHERE id=%ld", str1, str2, uid);
+    DBG("sql: UPDATE users SET passwd1=...");
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
@@ -2283,27 +2236,27 @@ int silgy_usr_reset_password(int ci)
 
     DBG("Invalidating all session tokens...");
 
-    sprintf(sql_query, "DELETE FROM users_logins WHERE user_id = %ld", uid);
-    DBG("sql_query: %s", sql_query);
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "DELETE FROM users_logins WHERE user_id = %ld", uid);
+    DBG("sql: %s", sql);
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
     /* downgrade all currently active sessions belonging to this user */
 
-    downgrade_uses_by_uid(uid, -1);
+    eng_uses_downgrade_by_uid(uid, -1);
 
     /* remove all password reset keys */
 
     DBG("Deleting from users_p_resets...");
 
-    sprintf(sql_query, "DELETE FROM users_p_resets WHERE user_id=%ld", uid);
-    DBG("sql_query: %s", sql_query);
-    if ( mysql_query(G_dbconn, sql_query) )
+    sprintf(sql, "DELETE FROM users_p_resets WHERE user_id=%ld", uid);
+    DBG("sql: %s", sql);
+    if ( mysql_query(G_dbconn, sql) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
 //        return ERR_INT_SERVER_ERROR;  ignore it
     }
 
@@ -2317,7 +2270,7 @@ int silgy_usr_reset_password(int ci)
 void silgy_usr_logout(int ci)
 {
     DBG("silgy_usr_logout");
-    downgrade_uses(conn[ci].usi, ci, TRUE);
+    libusr_luses_downgrade(conn[ci].usi, ci, TRUE);
 }
 
 
@@ -2373,36 +2326,36 @@ static void doit(char *result1, char *result2, const char *login, const char *em
 int silgy_usr_set_str(int ci, const char *us_key, const char *us_val)
 {
     int  ret=OK;
-    char sql_query[SQLBUF];
+    char sql[SQLBUF];
 
     ret = silgy_usr_get_str(ci, us_key, NULL);
 
     if ( ret == ERR_NOT_FOUND )
     {
-        sprintf(sql_query, "INSERT INTO users_settings (user_id,us_key,us_val) VALUES (%ld,'%s','%s')", US.uid, us_key, us_val);
+        sprintf(sql, "INSERT INTO users_settings (user_id,us_key,us_val) VALUES (%ld,'%s','%s')", US.uid, us_key, us_val);
 
-        DBG("sql_query: %s", sql_query);
+        DBG("sql: %s", sql);
 
-        if ( mysql_query(G_dbconn, sql_query) )
+        if ( mysql_query(G_dbconn, sql) )
         {
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
             return ERR_INT_SERVER_ERROR;
         }
     }
     else if ( ret != OK )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
     else
     {
-        sprintf(sql_query, "UPDATE users_settings SET us_val='%s' WHERE user_id=%ld AND us_key='%s'", us_val, US.uid, us_key);
+        sprintf(sql, "UPDATE users_settings SET us_val='%s' WHERE user_id=%ld AND us_key='%s'", us_val, US.uid, us_key);
 
-        DBG("sql_query: %s", sql_query);
+        DBG("sql: %s", sql);
 
-        if ( mysql_query(G_dbconn, sql_query) )
+        if ( mysql_query(G_dbconn, sql) )
         {
-            ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
             return ERR_INT_SERVER_ERROR;
         }
     }
@@ -2416,39 +2369,39 @@ int silgy_usr_set_str(int ci, const char *us_key, const char *us_val)
 -------------------------------------------------------------------------- */
 int silgy_usr_get_str(int ci, const char *us_key, char *us_val)
 {
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    unsigned long sql_records;
+    MYSQL_ROW   row;
+    unsigned    records;
 
-    sprintf(sql_query, "SELECT us_val FROM users_settings WHERE user_id=%ld AND us_key='%s'", US.uid, us_key);
+    sprintf(sql, "SELECT us_val FROM users_settings WHERE user_id=%ld AND us_key='%s'", US.uid, us_key);
 
-    DBG("sql_query: %s", sql_query);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    DBG("users_settings: %lu record(s) found", sql_records);
+    DBG("users_settings: %u record(s) found", records);
 
-    if ( 0 == sql_records )
+    if ( 0 == records )
     {
         mysql_free_result(result);
         return ERR_NOT_FOUND;
     }
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
     if ( us_val )
-        strcpy(us_val, sql_row[0]);
+        strcpy(us_val, row[0]);
 
     mysql_free_result(result);
 
@@ -2488,34 +2441,34 @@ int silgy_usr_get_int(int ci, const char *us_key, long *us_val)
 -------------------------------------------------------------------------- */
 static long get_max(int ci, const char *table)
 {
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
+    MYSQL_ROW   row;
     long        max=0;
 
     /* US.uid = 0 for anonymous session */
 
     if ( 0==strcmp(table, "messages") )
-        sprintf(sql_query, "SELECT MAX(msg_id) FROM users_messages WHERE user_id=%ld", US.uid);
+        sprintf(sql, "SELECT MAX(msg_id) FROM users_messages WHERE user_id=%ld", US.uid);
     else
         return 0;
 
-    DBG("sql_query: %s", sql_query);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return ERR_INT_SERVER_ERROR;
     }
 
-    sql_row = mysql_fetch_row(result);
+    row = mysql_fetch_row(result);
 
-    if ( sql_row[0] != NULL )
-        max = atol(sql_row[0]);
+    if ( row[0] != NULL )
+        max = atol(row[0]);
 
     mysql_free_result(result);
 

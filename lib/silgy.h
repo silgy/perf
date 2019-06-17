@@ -87,9 +87,6 @@ typedef char str32k[1024*32];
 typedef char str64k[1024*64];
 
 
-#define SEND_ALL_AT_ONCE    /* don't split response to two send-s */
-
-
 #include "silgy_app.h"
 
 
@@ -215,19 +212,11 @@ typedef char str64k[1024*64];
 
     #ifdef OUTFAST
         #define OUTSS(str)                  (conn[ci].p_content = stpcpy(conn[ci].p_content, str))
-#ifdef SEND_ALL_AT_ONCE
         #define OUT_BIN(data, len)          (len=(len>OUT_BUFSIZE-OUT_HEADER_BUFSIZE?OUT_BUFSIZE-OUT_HEADER_BUFSIZE:len), memcpy(conn[ci].p_content, data, len), conn[ci].p_content += len)
-#else
-        #define OUT_BIN(data, len)          (len=(len>OUT_BUFSIZE?OUT_BUFSIZE:len), memcpy(conn[ci].p_content, data, len), conn[ci].p_content += len)
-#endif
     #else
         #ifdef OUTCHECK
             #define OUTSS(str)                  eng_out_check(ci, str)
-#ifdef SEND_ALL_AT_ONCE
             #define OUT_BIN(data, len)          (len=(len>OUT_BUFSIZE-OUT_HEADER_BUFSIZE?OUT_BUFSIZE-OUT_HEADER_BUFSIZE:len), memcpy(conn[ci].p_content, data, len), conn[ci].p_content += len)
-#else
-            #define OUT_BIN(data, len)          (len=(len>OUT_BUFSIZE?OUT_BUFSIZE:len), memcpy(conn[ci].p_content, data, len), conn[ci].p_content += len)
-#endif
         #else   /* OUTCHECKREALLOC */
             #define OUTSS(str)                  eng_out_check_realloc(ci, str)
             #define OUT_BIN(data, len)          eng_out_check_realloc_bin(ci, data, len)
@@ -391,8 +380,12 @@ typedef char str64k[1024*64];
 #define MONOTONIC_CLOCK_NAME            CLOCK_MONOTONIC
 #endif
 
+#ifndef MAX_BLACKLIST
 #define MAX_BLACKLIST                   10000
-
+#endif
+#ifndef MAX_WHITELIST
+#define MAX_WHITELIST                   10000
+#endif
 
 #ifndef APP_WEBSITE
 #define APP_WEBSITE                     "Silgy Web Application"
@@ -420,6 +413,8 @@ typedef char str64k[1024*64];
 #ifndef COMPRESS_LEVEL
 #define COMPRESS_LEVEL                  Z_BEST_SPEED
 #endif
+
+#define SHOULD_BE_COMPRESSED(len, type) (len > COMPRESS_TRESHOLD && (type==RES_HTML || type==RES_TEXT || type==RES_JSON || type==RES_CSS || type==RES_JS || type==RES_SVG || type==RES_EXE || type==RES_BMP))
 
 
 /* UTF-8 */
@@ -544,18 +539,21 @@ typedef char str64k[1024*64];
 #define ASYNC_STATE_RECEIVED            '2'
 #define ASYNC_STATE_TIMEOUTED           '3'
 
-#ifndef ASYNC_MQ_MAXMSG                                         /* max messages in a message queue */
-#define ASYNC_MQ_MAXMSG                 10
+
+#ifndef ASYNC_MQ_MAXMSG
+#define ASYNC_MQ_MAXMSG                 10                      /* max messages in a message queue */
 #endif
 
-#define MAX_ASYNC                       ASYNC_MQ_MAXMSG*2       /* max queued async responses */
-
-#ifndef ASYNC_REQ_MSG_SIZE                                      /* request message size */
-#define ASYNC_REQ_MSG_SIZE              8192
+#ifndef MAX_ASYNC_REQS
+#define MAX_ASYNC_REQS                  MAX_SESSIONS            /* max simultaneous async requests */
 #endif
 
-#ifndef ASYNC_RES_MSG_SIZE                                      /* response message size */
-#define ASYNC_RES_MSG_SIZE              8192
+#ifndef ASYNC_REQ_MSG_SIZE
+#define ASYNC_REQ_MSG_SIZE              8192                    /* request message size */
+#endif
+
+#ifndef ASYNC_RES_MSG_SIZE
+#define ASYNC_RES_MSG_SIZE              8192                    /* response message size */
 #endif
 
 #define ASYNC_REQ_QUEUE                 "/silgy_req"            /* request queue name */
@@ -569,8 +567,8 @@ typedef char str64k[1024*64];
 #define ASYNC_SHM_SIZE                  MAX_PAYLOAD_SIZE
 
 /* these are flags */
-#define ASYNC_CHUNK_FIRST               0x4000
-#define ASYNC_CHUNK_LAST                0x8000
+#define ASYNC_CHUNK_FIRST               0x040000
+#define ASYNC_CHUNK_LAST                0x080000
 #define ASYNC_CHUNK_IS_FIRST(n)         ((n & ASYNC_CHUNK_FIRST) == ASYNC_CHUNK_FIRST)
 #define ASYNC_CHUNK_IS_LAST(n)          ((n & ASYNC_CHUNK_LAST) == ASYNC_CHUNK_LAST)
 
@@ -770,9 +768,9 @@ typedef struct {
 
 typedef struct {
     unsigned call_id;
+    int      ai;
     int      ci;
     char     service[SVC_NAME_LEN+1];
-    int      ai;
     /* pass some request details over */
     char     ip[INET_ADDRSTRLEN];
     char     method[MAX_METHOD_LEN+1];
@@ -782,6 +780,7 @@ typedef struct {
     char     resource[MAX_RESOURCE_LEN+1];
     char     uagent[MAX_VALUE_LEN+1];
     bool     mobile;
+    char     referer[MAX_VALUE_LEN+1];
     unsigned clen;
     char     host[MAX_VALUE_LEN+1];
     char     website[256];
@@ -790,6 +789,7 @@ typedef struct {
     char     boundary[MAX_VALUE_LEN+1];
     char     response;
     int      status;
+    char     ctype;
     usession_t uses;
 #ifndef ASYNC_EXCLUDE_AUSES
     ausession_t auses;
@@ -797,13 +797,17 @@ typedef struct {
     counters_t cnts_today;
     counters_t cnts_yesterday;
     counters_t cnts_day_before;
-    int     days_up;
-    int     open_conn;
-    int     open_conn_hwm;
-    int     sessions;
-    int     sessions_hwm;
-    char    last_modified[32];
-    int     blacklist_cnt;
+    unsigned days_up;
+    int      open_conn;
+    int      open_conn_hwm;
+    int      sessions;
+    int      sessions_hwm;
+    char     last_modified[32];
+    int      blacklist_cnt;
+    char     cookie_out_a[SESID_LEN+1];
+    char     cookie_out_a_exp[32];
+    char     cookie_out_l[SESID_LEN+1];
+    char     cookie_out_l_exp[32];
 } async_req_hdr_t;
 
 typedef struct {
@@ -811,20 +815,22 @@ typedef struct {
     char            data[ASYNC_REQ_MSG_SIZE-sizeof(async_req_hdr_t)];
 } async_req_t;
 
-/* response */
+
+/* async requests stored on the silgy_app's side */
 
 typedef struct {
-    unsigned call_id;
     int      ci;
-    char     service[SVC_NAME_LEN+1];
-    int      ai;
     char     state;
     time_t   sent;
     int      timeout;
+} areq_t;
+
+
+/* response -- the first chunk */
+
+typedef struct {
     int      err_code;
     int      status;
-    int      chunk;
-    unsigned clen;
     char     ctype;
     char     ctypestr[256];
     char     cdisp[256];
@@ -842,12 +848,30 @@ typedef struct {
 #ifndef ASYNC_EXCLUDE_AUSES
     ausession_t auses;
 #endif
+    long     invalidate_uid;
+    int      invalidate_ci;
 } async_res_hdr_t;
 
 typedef struct {
+    int             ai;
+    int             chunk;
+    int             ci;
+    int             len;
     async_res_hdr_t hdr;
-    char            data[ASYNC_RES_MSG_SIZE-sizeof(async_res_hdr_t)];
+    char            data[ASYNC_RES_MSG_SIZE-sizeof(async_res_hdr_t)-sizeof(int)*4];
 } async_res_t;
+
+
+/* response -- the second type for the chunks > 1 */
+
+typedef struct {
+    int      ai;
+    int      chunk;
+    int      ci;
+    int      len;
+    char     data[ASYNC_RES_MSG_SIZE-sizeof(int)*4];
+} async_res_data_t;
+
 
 
 /* connection */
@@ -861,6 +885,7 @@ typedef struct {                            /* request details for silgy_svc */
     char     resource[MAX_RESOURCE_LEN+1];
     char     uagent[MAX_VALUE_LEN+1];
     bool     mobile;
+    char     referer[MAX_VALUE_LEN+1];
     unsigned clen;
     char     *in_data;
     unsigned in_data_allocated;
@@ -925,12 +950,8 @@ typedef struct {
     bool     accept_deflate;
     /* what goes out */
     unsigned out_hlen;                       /* outgoing header length */
-#ifdef SEND_ALL_AT_ONCE
     unsigned out_len;                        /* outgoing length (all) */
     char     *out_start;
-#else
-    char     out_header[OUT_HEADER_BUFSIZE]; /* outgoing HTTP header */
-#endif
 #ifdef OUTCHECKREALLOC
     char     *out_data_alloc;                /* allocated space for rendered content */
 #else
@@ -974,7 +995,7 @@ typedef struct {
 #ifdef ASYNC
     char     service[SVC_NAME_LEN+1];
     int      async_err_code;
-    int      ai;                             /* async responses array index */
+//    int      ai;                             /* async responses array index */
 #endif
 } conn_t;
 #endif  /* SILGY_SVC */
@@ -987,6 +1008,8 @@ typedef struct {
     char     type;
     char     *data;
     unsigned len;
+    char     *data_deflated;
+    unsigned len_deflated;
     time_t   modified;
     char     source;
 } stat_res_t;
@@ -1051,6 +1074,7 @@ extern char     G_dbUser[128];
 extern char     G_dbPassword[128];
 extern int      G_usersRequireAccountActivation;
 extern char     G_blockedIPList[256];
+extern char     G_whiteList[256];
 extern int      G_ASYNCId;
 extern int      G_ASYNCDefTimeout;
 extern int      G_RESTTimeout;
@@ -1087,10 +1111,6 @@ extern char     G_req_queue_name[256];
 extern char     G_res_queue_name[256];
 extern mqd_t    G_queue_req;                /* request queue */
 extern mqd_t    G_queue_res;                /* response queue */
-#ifdef ASYNC
-extern async_res_t ares[MAX_ASYNC];         /* async response array */
-extern unsigned G_last_call_id;             /* counter */
-#endif  /* ASYNC */
 #endif  /* _WIN32 */
 extern int      G_async_req_data_size;      /* how many bytes are left for data */
 extern int      G_async_res_data_size;      /* how many bytes are left for data */
@@ -1112,6 +1132,9 @@ extern int      ci;
 
 extern char     G_blacklist[MAX_BLACKLIST+1][INET_ADDRSTRLEN];
 extern int      G_blacklist_cnt;            /* G_blacklist length */
+
+extern char     G_whitelist[MAX_WHITELIST+1][INET_ADDRSTRLEN];
+extern int      G_whitelist_cnt;            /* G_whitelist length */
 /* counters */
 extern counters_t G_cnts_today;             /* today's counters */
 extern counters_t G_cnts_yesterday;         /* yesterday's counters */
@@ -1147,8 +1170,7 @@ extern "C" {
 
     void silgy_set_auth_level(const char *resource, short level);
     int  eng_uses_start(int ci, const char *sesid);
-    void eng_uses_close(int usi);
-    void eng_uses_reset(int usi);
+    void eng_uses_downgrade_by_uid(long uid, int ci);
     void eng_async_req(int ci, const char *service, const char *data, char response, int timeout, int size);
     void silgy_add_to_static_res(const char *name, const char *src);
     void eng_block_ip(const char *value, bool autoblocked);

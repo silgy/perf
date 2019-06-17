@@ -40,6 +40,7 @@ char        G_dbUser[128]="";
 char        G_dbPassword[128]="";
 int         G_usersRequireAccountActivation=0;
 char        G_blockedIPList[256]="";
+char        G_whiteList[256]="";
 int         G_ASYNCId=0;
 int         G_ASYNCDefTimeout=ASYNC_DEF_TIMEOUT;
 /* end of config params */
@@ -63,18 +64,17 @@ char        G_req_queue_name[256]="";
 char        G_res_queue_name[256]="";
 mqd_t       G_queue_req={0};            /* request queue */
 mqd_t       G_queue_res={0};            /* response queue */
-#ifdef ASYNC
-async_res_t ares[MAX_ASYNC]={0};        /* async response array */
-unsigned    G_last_call_id=0;           /* counter */
-#endif  /* ASYNC */
 #endif  /* _WIN32 */
 int         G_async_req_data_size=ASYNC_REQ_MSG_SIZE-sizeof(async_req_hdr_t); /* how many bytes are left for data */
-int         G_async_res_data_size=ASYNC_RES_MSG_SIZE-sizeof(async_res_hdr_t); /* how many bytes are left for data */
+int         G_async_res_data_size=ASYNC_RES_MSG_SIZE-sizeof(async_res_hdr_t)-sizeof(int)*4; /* how many bytes are left for data */
 
 bool        G_index_present=FALSE;      /* index.html present in res? */
 
 char        G_blacklist[MAX_BLACKLIST+1][INET_ADDRSTRLEN];
 int         G_blacklist_cnt=0;          /* G_blacklist length */
+
+char        G_whitelist[MAX_WHITELIST+1][INET_ADDRSTRLEN];
+int         G_whitelist_cnt=0;          /* G_whitelist length */
 /* counters */
 counters_t  G_cnts_today={0};           /* today's counters */
 counters_t  G_cnts_yesterday={0};       /* yesterday's counters */
@@ -149,7 +149,7 @@ static int          M_poll_ci[MAX_CONNECTIONS+LISTENING_FDS]={0};
 
 #endif  /* FD_MON_POLL */
 
-static stat_res_t   M_stat[MAX_STATICS];        /* static resources */
+static stat_res_t   M_stat[MAX_STATICS]={0};    /* static resources */
 static char         M_resp_date[32];            /* response header Date */
 static char         M_expires_stat[32];         /* response header for static resources */
 static char         M_expires_gen[32];          /* response header for generated resources */
@@ -168,8 +168,10 @@ static int          M_prev_day;
 static time_t       M_last_housekeeping=0;
 
 #ifdef ASYNC
+static areq_t       areqs[MAX_ASYNC_REQS]={0};  /* async requests */
+static unsigned     M_last_call_id=0;           /* counter */
 static char         *M_async_shm=NULL;
-#endif
+#endif  /* ASYNC */
 
 
 /* prototypes */
@@ -188,10 +190,13 @@ static void accept_http();
 static void accept_https();
 static void read_blocked_ips(void);
 static bool ip_blocked(const char *addr);
+static void read_allowed_ips(void);
+static bool ip_allowed(const char *addr);
 static int  first_free_stat(void);
 static bool read_files(bool minify, bool first_scan, const char *path);
 static int  is_static_res(int ci, const char *name);
 static void process_req(int ci);
+static unsigned deflate_data(unsigned char *dest, const unsigned char *src, unsigned src_len);
 static void gen_response_header(int ci);
 static void print_content_type(int ci, char type);
 static bool a_usession_ok(int ci);
@@ -404,17 +409,17 @@ int main(int argc, char **argv)
 #endif  /* _WIN32 */
 
 #ifdef ASYNC
-        /* mark timeout-ed */
+        /* release timeout-ed */
 
-        for ( j=0; j<MAX_ASYNC; ++j )
+        for ( j=0; j<MAX_ASYNC_REQS; ++j )
         {
-            if ( ares[j].hdr.state==ASYNC_STATE_SENT && ares[j].hdr.sent < G_now-ares[j].hdr.timeout )
+            if ( areqs[j].state==ASYNC_STATE_SENT && areqs[j].sent < G_now-areqs[j].timeout )
             {
                 DBG("Async request %d timeout-ed", j);
-                conn[ares[j].hdr.ci].async_err_code = ERR_ASYNC_TIMEOUT;
-                conn[ares[j].hdr.ci].status = 500;
-                ares[j].hdr.state = ASYNC_STATE_FREE;
-                gen_response_header(ares[j].hdr.ci);
+                conn[areqs[j].ci].async_err_code = ERR_ASYNC_TIMEOUT;
+                conn[areqs[j].ci].status = 500;
+                areqs[j].state = ASYNC_STATE_FREE;
+                gen_response_header(areqs[j].ci);
             }
         }
 #endif
@@ -642,58 +647,6 @@ int main(int argc, char **argv)
                         }
 #endif  /* DUMP */
 
-
-/* ----------------------------------------------------------------------------------------------------------------------- */
-#ifdef ASYNC_USE_APP_CONTINUE   /* depreciated */
-                        /* async processing */
-#ifdef ASYNC
-                        if ( conn[i].conn_state == CONN_STATE_WAITING_FOR_ASYNC )
-                        {
-#ifdef DUMP
-                            if ( G_now != dbg_last_time4 )   /* only once in a second */
-                            {
-                                DBG("ci=%d, state == CONN_STATE_WAITING_FOR_ASYNC", i);
-                                dbg_last_time4 = G_now;
-                            }
-#endif  /* DUMP */
-                            if ( conn[i].ai != -1 )   /* we have a response from silgy_svc or async call timeouted */
-                            {
-                                if ( ares[conn[i].ai].hdr.state == ASYNC_STATE_RECEIVED )
-                                {
-                                    DBG("Async response in an array for ci=%d, processing", i);
-
-                                    strcpy(conn[i].service, ares[conn[i].ai].hdr.service);
-                                    conn[i].async_err_code = ares[conn[i].ai].hdr.err_code;
-                                    conn[i].status = ares[conn[i].ai].hdr.status;
-
-                                    if ( conn[i].usi )  /* update user session */
-                                    {
-                                        memcpy(&uses[conn[i].usi], &ares[conn[i].ai].hdr.uses, sizeof(usession_t));
-#ifndef ASYNC_EXCLUDE_AUSES
-                                        memcpy(&auses[conn[i].usi], &ares[conn[i].ai].hdr.auses, sizeof(ausession_t));
-#endif
-                                    }
-                                    silgy_app_continue(i, ares[conn[i].ai].data);
-                                }
-                                else if ( ares[conn[i].ai].hdr.state == ASYNC_STATE_TIMEOUTED )
-                                {
-                                    ERR("CALL_ASYNC call_id=%d timeouted", ares[conn[i].ai].hdr.call_id);
-                                    conn[i].async_err_code = ERR_ASYNC_TIMEOUT;
-                                    DBG("Async response continue as timeout-ed for ci=%d", i);
-                                    silgy_app_continue(i, NULL);
-                                }
-
-                                gen_response_header(i);
-
-                                ares[conn[i].ai].hdr.state = ASYNC_STATE_FREE;
-                                conn[i].ai = -1;
-                            }
-                        }
-#endif  /* ASYNC */
-#endif  /* ASYNC_USE_APP_CONTINUE */
-/* ----------------------------------------------------------------------------------------------------------------------- */
-
-
 #ifdef HTTPS
                         if ( conn[i].secure )   /* HTTPS */
                         {
@@ -703,32 +656,22 @@ int main(int argc, char **argv)
                                 DBG("ci=%d, state == CONN_STATE_READY_TO_SEND_HEADER", i);
                                 DBG("Trying SSL_write %u bytes to fd=%d (ci=%d)", conn[i].out_hlen, conn[i].fd, i);
 #endif  /* DUMP */
-#ifdef SEND_ALL_AT_ONCE
                                 bytes = SSL_write(conn[i].ssl, conn[i].out_start, conn[i].out_len);
 #ifdef DUMP
                                 DBG("ci=%d, changing state to CONN_STATE_READY_TO_SEND_BODY", i);
 #endif
                                 conn[i].conn_state = CONN_STATE_READY_TO_SEND_BODY;
-#else
-                                bytes = SSL_write(conn[i].ssl, conn[i].out_header, conn[i].out_hlen);
-#endif  /* SEND_ALL_AT_ONCE */
+
                                 set_state_sec(i, bytes);
                             }
                             else if ( conn[i].conn_state == CONN_STATE_READY_TO_SEND_BODY || conn[i].conn_state == CONN_STATE_SENDING_BODY)
                             {
 #ifdef DUMP
                                 DBG("ci=%d, state == %s", i, conn[i].conn_state==CONN_STATE_READY_TO_SEND_BODY?"CONN_STATE_READY_TO_SEND_BODY":"CONN_STATE_SENDING_BODY");
-#ifdef SEND_ALL_AT_ONCE
                                 DBG("Trying SSL_write %u bytes to fd=%d (ci=%d)", conn[i].out_len, conn[i].fd, i);
-#else
-                                DBG("Trying SSL_write %u bytes to fd=%d (ci=%d)", conn[i].clen, conn[i].fd, i);
-#endif
 #endif  /* DUMP */
-#ifdef SEND_ALL_AT_ONCE
                                 bytes = SSL_write(conn[i].ssl, conn[i].out_start, conn[i].out_len);
-#else
-                                bytes = SSL_write(conn[i].ssl, conn[i].out_data, conn[i].clen);
-#endif
+
                                 set_state_sec(i, bytes);
                             }
                         }
@@ -739,21 +682,14 @@ int main(int argc, char **argv)
                             {
 #ifdef DUMP
                                 DBG("ci=%d, state == CONN_STATE_READY_TO_SEND_HEADER", i);
-#ifdef SEND_ALL_AT_ONCE
                                 DBG("Trying to write %u bytes to fd=%d (ci=%d)", conn[i].out_len, conn[i].fd, i);
-#else
-                                DBG("Trying to write %u bytes to fd=%d (ci=%d)", conn[i].out_hlen, conn[i].fd, i);
-#endif
 #endif  /* DUMP */
-#ifdef SEND_ALL_AT_ONCE
                                 bytes = send(conn[i].fd, conn[i].out_start, conn[i].out_len, 0);
 #ifdef DUMP
                                 DBG("ci=%d, changing state to CONN_STATE_READY_TO_SEND_BODY", i);
 #endif
                                 conn[i].conn_state = CONN_STATE_READY_TO_SEND_BODY;
-#else
-                                bytes = send(conn[i].fd, conn[i].out_header, conn[i].out_hlen, 0);
-#endif  /* SEND_ALL_AT_ONCE */
+
                                 set_state(i, bytes);    /* possibly:    CONN_STATE_DISCONNECTED (if error or closed by peer) */
                                                         /*              CONN_STATE_READY_TO_SEND_BODY */
                             }
@@ -761,17 +697,10 @@ int main(int argc, char **argv)
                             {
 #ifdef DUMP
                                 DBG("ci=%d, state == %s", i, conn[i].conn_state==CONN_STATE_READY_TO_SEND_BODY?"CONN_STATE_READY_TO_SEND_BODY":"CONN_STATE_SENDING_BODY");
-#ifdef SEND_ALL_AT_ONCE
                                 DBG("Trying to write %u bytes to fd=%d (ci=%d)", conn[i].out_len-conn[i].data_sent, conn[i].fd, i);
-#else
-                                DBG("Trying to write %u bytes to fd=%d (ci=%d)", conn[i].clen-conn[i].data_sent, conn[i].fd, i);
-#endif
 #endif  /* DUMP */
-#ifdef SEND_ALL_AT_ONCE
                                 bytes = send(conn[i].fd, conn[i].out_start+conn[i].data_sent, conn[i].out_len-conn[i].data_sent, 0);
-#else
-                                bytes = send(conn[i].fd, conn[i].out_data+conn[i].data_sent, conn[i].clen-conn[i].data_sent, 0);
-#endif
+
                                 set_state(i, bytes);    /* possibly:    CONN_STATE_DISCONNECTED (if error or closed by peer or !keep_alive) */
                                                         /*              CONN_STATE_SENDING_BODY (if data_sent < clen) */
                                                         /*              CONN_STATE_CONNECTED */
@@ -864,41 +793,79 @@ int main(int argc, char **argv)
         if ( mq_receive(G_queue_res, (char*)&res, ASYNC_RES_MSG_SIZE, NULL) != -1 )    /* there's a response in the queue */
 #endif  /* DUMP */
         {
-            DBG("Message received");
+#ifdef DUMP
+            DBG("res.chunk=%d", res.chunk);
+            DBG("(unsigned short)res.chunk=%hd", (unsigned short)res.chunk);
+#endif  /* DUMP */
 
-            DBG("res.hdr.chunk = %d", res.hdr.chunk);
+            unsigned chunk_num = 0;
+            chunk_num |= (unsigned short)res.chunk;
 
-            DBG("res.hdr.call_id=%d", res.hdr.call_id);
-            DBG("res.hdr.ci=%d", res.hdr.ci);
-            DBG("res.hdr.service [%s]", res.hdr.service);
-            DBG("res.hdr.err_code = %d", res.hdr.err_code);
-            DBG("res.hdr.status = %d", res.hdr.status);
+            DBG("ASYNC response received, chunk=%u", chunk_num);
 
-            if ( ASYNC_CHUNK_IS_FIRST(res.hdr.chunk) )
+            int  res_ai;
+            int  res_ci;
+            int  res_len;
+            char *res_data;
+
+            if ( ASYNC_CHUNK_IS_FIRST(res.chunk) )  /* get all the response's details */
             {
+                DBG("ASYNC_CHUNK_IS_FIRST");
+                DBG("res.ci=%d", res.ci);
+                DBG("res.hdr.err_code = %d", res.hdr.err_code);
+                DBG("res.hdr.status = %d", res.hdr.status);
+                DBG("res.len = %d", res.len);
+
                 /* error code & status */
 
-                conn[res.hdr.ci].async_err_code = res.hdr.err_code;
-                conn[res.hdr.ci].status = res.hdr.status;
+                conn[res.ci].async_err_code = res.hdr.err_code;
+                conn[res.ci].status = res.hdr.status;
 
                 /* update user session */
 
-                memcpy(&uses[conn[res.hdr.ci].usi], &res.hdr.uses, sizeof(usession_t));
+                if ( conn[res.ci].usi )   /* session had existed before CALL_ASYNC */
+                {
+                    memcpy(&uses[conn[res.ci].usi], &res.hdr.uses, sizeof(usession_t));
 #ifndef ASYNC_EXCLUDE_AUSES
-                memcpy(&auses[conn[res.hdr.ci].usi], &res.hdr.auses, sizeof(ausession_t));
+                    memcpy(&auses[conn[res.ci].usi], &res.hdr.auses, sizeof(ausession_t));
 #endif
+                }
+                else if ( res.hdr.uses.sesid[0] )   /* session has been started in silgy_svc */
+                {
+                    DBG("New session has been started in silgy_svc, adding to uses");
+
+                    if ( eng_uses_start(res.ci, res.hdr.uses.sesid) != OK )
+                    {
+                        ERR("Couldn't start a session after silgy_svc had started it. Your memory model may be too low.");
+                    }
+                    else    /* OK, copy the session details from the response */
+                    {
+                        memcpy(&uses[conn[res.ci].usi], &res.hdr.uses, sizeof(usession_t));
+#ifndef ASYNC_EXCLUDE_AUSES
+                        memcpy(&auses[conn[res.ci].usi], &res.hdr.auses, sizeof(ausession_t));
+#endif
+                    }
+                }
+
+                /* password change or user deleted */
+
+                if ( res.hdr.invalidate_uid )
+                {
+                    eng_uses_downgrade_by_uid(res.hdr.invalidate_uid, res.hdr.invalidate_ci);
+                }
+
                 /* update connection details */
 
-                conn[res.hdr.ci].ctype = res.hdr.ctype;
-                strcpy(conn[res.hdr.ci].ctypestr, res.hdr.ctypestr);
-                strcpy(conn[res.hdr.ci].cdisp, res.hdr.cdisp);
-                strcpy(conn[res.hdr.ci].cookie_out_a, res.hdr.cookie_out_a);
-                strcpy(conn[res.hdr.ci].cookie_out_a_exp, res.hdr.cookie_out_a_exp);
-                strcpy(conn[res.hdr.ci].cookie_out_l, res.hdr.cookie_out_l);
-                strcpy(conn[res.hdr.ci].cookie_out_l_exp, res.hdr.cookie_out_l_exp);
-                strcpy(conn[res.hdr.ci].location, res.hdr.location);
-                conn[res.hdr.ci].dont_cache = res.hdr.dont_cache;
-                conn[res.hdr.ci].keep_content = res.hdr.keep_content;
+                conn[res.ci].ctype = res.hdr.ctype;
+                strcpy(conn[res.ci].ctypestr, res.hdr.ctypestr);
+                strcpy(conn[res.ci].cdisp, res.hdr.cdisp);
+                strcpy(conn[res.ci].cookie_out_a, res.hdr.cookie_out_a);
+                strcpy(conn[res.ci].cookie_out_a_exp, res.hdr.cookie_out_a_exp);
+                strcpy(conn[res.ci].cookie_out_l, res.hdr.cookie_out_l);
+                strcpy(conn[res.ci].cookie_out_l_exp, res.hdr.cookie_out_l_exp);
+                strcpy(conn[res.ci].location, res.hdr.location);
+                conn[res.ci].dont_cache = res.hdr.dont_cache;
+                conn[res.ci].keep_content = res.hdr.keep_content;
 
                 /* update REST stats */
 
@@ -909,25 +876,48 @@ int main(int argc, char **argv)
                     G_rest_elapsed += res.hdr.rest_elapsed;
                     G_rest_average = G_rest_elapsed / G_rest_req;
                 }
+
+                res_ai = res.ai;
+                res_ci = res.ci;
+                res_len = res.len;
+                res_data = res.data;
+            }
+            else    /* 'data' chunk */
+            {
+                DBG("'data' chunk");
+
+                async_res_data_t *resd = (async_res_data_t*)&res;
+
+                res_ai = resd->ai;
+                res_ci = resd->ci;
+                res_len = resd->len;
+                res_data = resd->data;
             }
 
             /* out data */
 
-            if ( res.hdr.clen > 0 )   /* chunk length */
+            if ( res_len > 0 )    /* chunk length */
             {
+                DBG("res_len = %d", res_len);
 #ifdef OUTCHECKREALLOC
-                eng_out_check_realloc_bin(res.hdr.ci, res.data, res.hdr.clen);
+                eng_out_check_realloc_bin(res_ci, res_data, res_len);
 #else
-                unsigned checked_len = res.hdr.clen > OUT_BUFSIZE-OUT_HEADER_BUFSIZE ? OUT_BUFSIZE-OUT_HEADER_BUFSIZE : res.hdr.clen;
-                memcpy(conn[res.hdr.ci].p_content, res.data, checked_len);
-                conn[res.hdr.ci].p_content += checked_len;
+                unsigned checked_len = res_len > OUT_BUFSIZE-OUT_HEADER_BUFSIZE ? OUT_BUFSIZE-OUT_HEADER_BUFSIZE : res_len;
+                memcpy(conn[res_ci].p_content, res_data, checked_len);
+                conn[res_ci].p_content += checked_len;
 #endif
             }
 
-            if ( ASYNC_CHUNK_IS_LAST(res.hdr.chunk) )
+            if ( ASYNC_CHUNK_IS_LAST(res.chunk) )
             {
-                ares[res.hdr.ai].hdr.state = ASYNC_STATE_FREE;
-                gen_response_header(res.hdr.ci);
+                DBG("ASYNC_CHUNK_IS_LAST");
+
+                areqs[res_ai].state = ASYNC_STATE_FREE;
+
+                if ( conn[res_ci].location[0] )
+                    conn[res_ci].status = 303;
+
+                gen_response_header(res_ci);
             }
         }
 #ifdef DUMP
@@ -945,19 +935,7 @@ int main(int argc, char **argv)
         }
 #endif  /* DUMP */
 
-        /* free timeout-ed */
-
-        for ( j=0; j<MAX_ASYNC; ++j )
-        {
-            if ( ares[j].hdr.state==ASYNC_STATE_TIMEOUTED )     /* apparently closed browser connection */
-            {
-                ares[j].hdr.state = ASYNC_STATE_FREE;
-            }
-        }
-
 #endif  /* ASYNC */
-
-//        ++time_elapsed;
 
         /* under heavy load there might never be that sockets_ready==0 */
         /* make sure it runs at least every 10 seconds */
@@ -1068,10 +1046,10 @@ static bool housekeeping()
             set_expiry_dates();
 
             if ( G_blockedIPList[0] )
-            {
-                /* update blacklist */
                 read_blocked_ips();
-            }
+
+            if ( G_whiteList[0] )
+                read_allowed_ips();
 
             /* copy & reset counters */
             memcpy(&G_cnts_day_before, &G_cnts_yesterday, sizeof(counters_t));
@@ -1171,11 +1149,7 @@ static void set_state(int ci, int bytes)
     {
         conn[ci].data_sent += bytes;
 
-#ifdef SEND_ALL_AT_ONCE
         if ( bytes < conn[ci].out_len )
-#else
-        if ( bytes < conn[ci].clen )
-#endif
         {
 #ifdef DUMP
             DBG("ci=%d, changing state to CONN_STATE_SENDING_BODY", ci);
@@ -1202,11 +1176,7 @@ static void set_state(int ci, int bytes)
     {
         conn[ci].data_sent += bytes;
 
-#ifdef SEND_ALL_AT_ONCE
         if ( conn[ci].data_sent < conn[ci].out_len )
-#else
-        if ( conn[ci].data_sent < conn[ci].clen )
-#endif
         {
             DBG("ci=%d, data_sent=%u, continue sending", ci, conn[ci].data_sent);
         }
@@ -1365,6 +1335,7 @@ static void read_conf()
     G_dbPassword[0] = EOS;
     G_usersRequireAccountActivation = 0;
     G_blockedIPList[0] = EOS;
+    G_whiteList[0] = EOS;
     G_ASYNCId = -1;
     G_ASYNCDefTimeout = ASYNC_DEF_TIMEOUT;
     G_RESTTimeout = CALL_REST_DEFAULT_TIMEOUT;
@@ -1401,6 +1372,7 @@ static void read_conf()
         silgy_read_param_str("dbPassword", G_dbPassword);
         silgy_read_param_int("usersRequireAccountActivation", &G_usersRequireAccountActivation);
         silgy_read_param_str("blockedIPList", G_blockedIPList);
+        silgy_read_param_str("whiteList", G_whiteList);
         silgy_read_param_int("ASYNCId", &G_ASYNCId);
         silgy_read_param_int("ASYNCDefTimeout", &G_ASYNCDefTimeout);
         silgy_read_param_int("RESTTimeout", &G_RESTTimeout);
@@ -1672,10 +1644,6 @@ static bool init(int argc, char **argv)
     ALWAYS("         FD monitoring = FD_MON_EPOLL");
 #endif
     ALWAYS("");
-#ifdef SEND_ALL_AT_ONCE
-    ALWAYS("    Response send mode = SEND_ALL_AT_ONCE");
-    ALWAYS("");
-#endif
     ALWAYS("          CONN_TIMEOUT = %d seconds", CONN_TIMEOUT);
     ALWAYS("          USES_TIMEOUT = %d seconds", USES_TIMEOUT);
 #ifdef USERS
@@ -1936,6 +1904,12 @@ static bool init(int argc, char **argv)
 
     read_blocked_ips();
 
+    /* read allowed IPs list --------------------------------------------- */
+
+    read_allowed_ips();
+
+    /* ASYNC ------------------------------------------------------------- */
+
 #ifdef ASYNC
     ALWAYS("\nOpening message queues...\n");
 
@@ -1974,11 +1948,15 @@ static bool init(int argc, char **argv)
 
     attr.mq_msgsize = ASYNC_REQ_MSG_SIZE;
 
-    G_queue_req = mq_open(G_req_queue_name, O_WRONLY | O_CREAT | O_NONBLOCK, 0664, &attr);
+    G_queue_req = mq_open(G_req_queue_name, O_WRONLY | O_CREAT | O_NONBLOCK, 0600, &attr);
+
     if (G_queue_req < 0)
+    {
         ERR("mq_open for req failed, errno = %d (%s)", errno, strerror(errno));
-    else
-        INF("mq_open %s OK", G_req_queue_name);
+        return FALSE;
+    }
+
+    INF("mq_open of %s OK", G_req_queue_name);
 
     /* ------------------------------------------------------------------- */
 
@@ -1987,18 +1965,22 @@ static bool init(int argc, char **argv)
 
     attr.mq_msgsize = ASYNC_RES_MSG_SIZE;   /* larger buffer */
 
-    G_queue_res = mq_open(G_res_queue_name, O_RDONLY | O_CREAT | O_NONBLOCK, 0664, &attr);
+    G_queue_res = mq_open(G_res_queue_name, O_RDONLY | O_CREAT | O_NONBLOCK, 0600, &attr);
+
     if (G_queue_res < 0)
+    {
         ERR("mq_open for res failed, errno = %d (%s)", errno, strerror(errno));
-    else
-        INF("mq_open %s OK", G_res_queue_name);
+        return FALSE;
+    }
+
+    INF("mq_open of %s OK", G_res_queue_name);
 
     /* ------------------------------------------------------------------- */
 
-    for (i=0; i<MAX_ASYNC; ++i)
-        ares[i].hdr.state = ASYNC_STATE_FREE;
+    for (i=0; i<MAX_ASYNC_REQS; ++i)
+        areqs[i].state = ASYNC_STATE_FREE;
 
-    G_last_call_id = 0;
+    M_last_call_id = 0;
 
     INF("");
 
@@ -2141,6 +2123,16 @@ static void accept_http()
         return;
     }
 
+    if ( G_whiteList[0] && !ip_allowed(remote_addr) )
+    {
+#ifdef _WIN32   /* Windows */
+        closesocket(connection);
+#else
+        close(connection);
+#endif  /* _WIN32 */
+        return;
+    }
+
     lib_setnonblocking(connection);
 
     /* find a free slot in conn */
@@ -2234,6 +2226,16 @@ static void accept_https()
     if ( G_blockedIPList[0] && ip_blocked(remote_addr) )
     {
         ++G_cnts_today.blocked;
+#ifdef _WIN32   /* Windows */
+        closesocket(connection);
+#else
+        close(connection);
+#endif  /* _WIN32 */
+        return;
+    }
+
+    if ( G_whiteList[0] && !ip_allowed(remote_addr) )
+    {
 #ifdef _WIN32   /* Windows */
         closesocket(connection);
 #else
@@ -2461,6 +2463,124 @@ static bool ip_blocked(const char *addr)
     for ( i=0; i<G_blacklist_cnt; ++i )
     {
         if ( 0==strcmp(G_blacklist[i], addr) )
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Read whitelist from the file
+-------------------------------------------------------------------------- */
+static void read_allowed_ips()
+{
+    char    fname[1024];
+    FILE    *h_file=NULL;
+    int     c=0;
+    int     i=0;
+    char    now_value=1;
+    char    now_comment=0;
+    char    value[64]="";
+
+    if ( G_whiteList[0] == EOS ) return;
+
+    INF("Updating whitelist");
+
+    /* open the file */
+
+    if ( G_whiteList[0] == '/' )    /* full path */
+        strcpy(fname, G_whiteList);
+    else if ( G_appdir[0] )
+        sprintf(fname, "%s/bin/%s", G_appdir, G_whiteList);
+    else
+        strcpy(fname, G_whiteList);
+
+    if ( NULL == (h_file=fopen(fname, "r")) )
+    {
+        WAR("Couldn't open %s\n", fname);
+        return;
+    }
+
+    G_whitelist_cnt = 0;
+
+    /* parse the file */
+
+    while ( EOF != (c=fgetc(h_file)) )
+    {
+        if ( c == ' ' || c == '\t' || c == '\r' ) continue;  /* omit whitespaces */
+
+        if ( c == '\n' )    /* end of value or end of comment or empty line */
+        {
+            if ( now_value && i )   /* end of value */
+            {
+                value[i] = EOS;
+                if ( !ip_blocked(value) )   /* avoid duplicates */
+                {
+                    strcpy(G_whitelist[G_whitelist_cnt++], value);
+                    if ( G_whitelist_cnt == MAX_WHITELIST )
+                    {
+                        WAR("Whitelist full! (%d IPs)", G_whitelist_cnt);
+                        now_value = 0;
+                        break;
+                    }
+                }
+                i = 0;
+            }
+            now_value = 1;
+            now_comment = 0;
+        }
+        else if ( now_comment )
+        {
+            continue;
+        }
+        else if ( c == '#' )    /* possible end of value */
+        {
+            if ( now_value && i )   /* end of value */
+            {
+                value[i] = EOS;
+                strcpy(G_whitelist[G_whitelist_cnt++], value);
+                if ( G_whitelist_cnt == MAX_WHITELIST )
+                {
+                    WAR("Whitelist full! (%d IPs)", G_whitelist_cnt);
+                    now_value = 0;
+                    break;
+                }
+                i = 0;
+            }
+            now_value = 0;
+            now_comment = 1;
+        }
+        else if ( now_value )   /* value */
+        {
+            if ( i < INET_ADDRSTRLEN-1 )
+                value[i++] = c;
+        }
+    }
+
+    if ( now_value && i )   /* end of value */
+    {
+        value[i] = EOS;
+        strcpy(G_whitelist[G_whitelist_cnt++], value);
+    }
+
+    if ( NULL != h_file )
+        fclose(h_file);
+
+    ALWAYS("%d IPs on whitelist", G_whitelist_cnt);
+}
+
+
+/* --------------------------------------------------------------------------
+   Return TRUE if addr is on whitelist
+-------------------------------------------------------------------------- */
+static bool ip_allowed(const char *addr)
+{
+    int i;
+
+    for ( i=0; i<G_whitelist_cnt; ++i )
+    {
+        if ( 0==strcmp(G_whitelist[i], addr) )
             return TRUE;
     }
 
@@ -2746,17 +2866,20 @@ static bool read_files(bool minify, bool first_scan, const char *path)
             /* allocate the final destination */
 
             if ( reread )
+            {
                 free(M_stat[i].data);
+                M_stat[i].data = NULL;
 
-#ifdef SEND_ALL_AT_ONCE
+                if ( M_stat[i].data_deflated )
+                {
+                    free(M_stat[i].data_deflated);
+                    M_stat[i].data_deflated = NULL;
+                }
+            }
+
             if ( NULL == (M_stat[i].data=(char*)malloc(M_stat[i].len+1+OUT_HEADER_BUFSIZE)) )
             {
                 ERR("Couldn't allocate %u bytes for %s", M_stat[i].len+1+OUT_HEADER_BUFSIZE, M_stat[i].name);
-#else
-            if ( NULL == (M_stat[i].data=(char*)malloc(M_stat[i].len+1)) )
-            {
-                ERR("Couldn't allocate %u bytes for %s", M_stat[i].len+1, M_stat[i].name);
-#endif  /* SEND_ALL_AT_ONCE */
                 fclose(fd);
                 closedir(dir);
                 return FALSE;
@@ -2764,11 +2887,7 @@ static bool read_files(bool minify, bool first_scan, const char *path)
 
             if ( minify )
             {
-#ifdef SEND_ALL_AT_ONCE
                 memcpy(M_stat[i].data+OUT_HEADER_BUFSIZE, data_tmp_min, M_stat[i].len+1);
-#else
-                memcpy(M_stat[i].data, data_tmp_min, M_stat[i].len+1);
-#endif
                 free(data_tmp);
                 free(data_tmp_min);
                 data_tmp = NULL;
@@ -2778,16 +2897,13 @@ static bool read_files(bool minify, bool first_scan, const char *path)
             }
             else
             {
-#ifdef SEND_ALL_AT_ONCE
                 fread(M_stat[i].data+OUT_HEADER_BUFSIZE, M_stat[i].len, 1, fd);
-#else
-                fread(M_stat[i].data, M_stat[i].len, 1, fd);
-#endif
-
                 M_stat[i].source = STATIC_SOURCE_RES;
             }
 
             fclose(fd);
+
+            /* get the file type ------------------------------- */
 
             if ( !reread )
             {
@@ -2797,7 +2913,56 @@ static bool read_files(bool minify, bool first_scan, const char *path)
                     G_index_present = TRUE;
             }
 
-            /* log file info */
+            /* compress ---------------------------------------- */
+
+#ifndef _WIN32
+
+            if ( SHOULD_BE_COMPRESSED(M_stat[i].len, M_stat[i].type) )
+            {
+                if ( NULL == (data_tmp=(char*)malloc(M_stat[i].len)) )
+                {
+                    ERR("Couldn't allocate %u bytes for %s", M_stat[i].len, M_stat[i].name);
+                    fclose(fd);
+                    closedir(dir);
+                    return FALSE;
+                }
+
+                unsigned deflated_len = deflate_data((unsigned char*)data_tmp, (unsigned char*)M_stat[i].data+OUT_HEADER_BUFSIZE, M_stat[i].len);
+
+                if ( deflated_len == -1 )
+                {
+                    WAR("Couldn't compress %s", M_stat[i].name);
+
+                    if ( M_stat[i].data_deflated )
+                    {
+                        free(M_stat[i].data_deflated);
+                        M_stat[i].data_deflated = NULL;
+                    }
+
+                    M_stat[i].len_deflated = 0;
+                }
+                else
+                {
+                    if ( NULL == (M_stat[i].data_deflated=(char*)malloc(deflated_len+OUT_HEADER_BUFSIZE)) )
+                    {
+                        ERR("Couldn't allocate %u bytes for deflated %s", deflated_len+OUT_HEADER_BUFSIZE, M_stat[i].name);
+                        fclose(fd);
+                        closedir(dir);
+                        free(data_tmp);
+                        return FALSE;
+                    }
+
+                    memcpy(M_stat[i].data_deflated+OUT_HEADER_BUFSIZE, data_tmp, deflated_len);
+                    M_stat[i].len_deflated = deflated_len;
+                }
+
+                free(data_tmp);
+                data_tmp = NULL;
+            }
+
+#endif  /* _WIN32 */
+
+            /* log file info ----------------------------------- */
 
             if ( G_logLevel > LOG_INF )
             {
@@ -2887,12 +3052,9 @@ static void process_req(int ci)
 #endif
 
     /* ------------------------------------------------------------------------ */
+    /* make room for a header */
 
-#ifdef SEND_ALL_AT_ONCE  /* make room for a header */
     conn[ci].p_content = conn[ci].out_data + OUT_HEADER_BUFSIZE;
-#else
-    conn[ci].p_content = conn[ci].out_data;
-#endif
 
     /* ------------------------------------------------------------------------ */
 
@@ -2994,11 +3156,8 @@ static void process_req(int ci)
 #endif
         if ( !conn[ci].keep_content )   /* reset out buffer pointer as it could have contained something already */
         {
-#ifdef SEND_ALL_AT_ONCE
             conn[ci].p_content = conn[ci].out_data + OUT_HEADER_BUFSIZE;
-#else
-            conn[ci].p_content = conn[ci].out_data;
-#endif
+
             if ( ret == OK )   /* RES_STATUS could be used, show the proper message */
             {
                 if ( conn[ci].status == 400 )
@@ -3020,6 +3179,63 @@ static void process_req(int ci)
 
         RES_DONT_CACHE;
     }
+}
+
+
+#ifndef _WIN32
+/* --------------------------------------------------------------------------
+   Compress src into dest, return dest length
+-------------------------------------------------------------------------- */
+static unsigned deflate_data(unsigned char *dest, const unsigned char *src, unsigned src_len)
+{
+    DBG("src_len = %u", src_len);
+
+    z_stream strm={0};
+
+    if ( deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK )
+    {
+        ERR("deflateInit failed");
+        return -1;
+    }
+
+    strm.next_in = (unsigned char*)src;
+    strm.avail_in = src_len;
+    strm.next_out = dest;
+    strm.avail_out = src_len;
+
+    int ret=Z_OK;
+
+//    while ( ret == Z_OK )
+//    {
+//        strm.avail_out = strm.avail_in ? strm.next_in-strm.next_out : (dest+src_len) - strm.next_out;
+        ret = deflate(&strm, Z_FINISH);
+//    }
+
+    if ( ret != Z_STREAM_END )
+    {
+        ERR("ret != Z_STREAM_END");
+        return -1;
+    }
+
+    if ( strm.total_out > src_len )
+    {
+        ERR("strm.total_out > src_len");
+        return -1;
+    }
+
+    unsigned new_len = strm.total_out;
+
+    deflateEnd(&strm);
+
+    if ( ret != Z_STREAM_END )
+    {
+        ERR("ret != Z_STREAM_END");
+        return -1;
+    }
+
+    DBG("new_len = %u", new_len);
+
+    return new_len;
 }
 
 
@@ -3046,7 +3262,6 @@ static void process_req(int ci)
    memory allocations and deallocations from the repeated use of deflateInit()
    and deflateEnd().
 -------------------------------------------------------------------------- */
-#ifndef _WIN32
 static int deflate_inplace(z_stream *strm, unsigned char *buf, unsigned len, unsigned *max)
 {
     int ret;                    /* return code from deflate functions */
@@ -3128,12 +3343,8 @@ static void gen_response_header(int ci)
 {
     DBG("gen_response_header, ci=%d", ci);
 
-#ifdef SEND_ALL_AT_ONCE
     char out_header[OUT_HEADER_BUFSIZE];
     conn[ci].p_header = out_header;
-#else
-    conn[ci].p_header = conn[ci].out_header;
-#endif
 
     PRINT_HTTP_STATUS(conn[ci].status);
 
@@ -3235,61 +3446,69 @@ static void gen_response_header(int ci)
             }
         }
 
-        if ( conn[ci].static_res == NOT_STATIC )    /* determine the content length */
-#ifdef SEND_ALL_AT_ONCE
+        /* content length and type */
+
+        if ( conn[ci].static_res == NOT_STATIC )
+        {
             conn[ci].clen = conn[ci].p_content - conn[ci].out_data - OUT_HEADER_BUFSIZE;
-#else
-            conn[ci].clen = conn[ci].p_content - conn[ci].out_data;
-#endif
-        else
+        }
+        else    /* static resource */
+        {
             conn[ci].clen = M_stat[conn[ci].static_res].len;
+            conn[ci].ctype = M_stat[conn[ci].static_res].type;
+        }
 
         /* compress? ------------------------------------------------------------------ */
 
 #ifndef _WIN32  /* just too much headache */
-        if ( conn[ci].static_res==NOT_STATIC && conn[ci].clen > COMPRESS_TRESHOLD && conn[ci].accept_deflate && (conn[ci].ctype==RES_HTML || conn[ci].ctype==RES_TEXT || conn[ci].ctype==RES_JSON || conn[ci].ctype==RES_BMP) && !UA_IE )
+
+        if ( SHOULD_BE_COMPRESSED(conn[ci].clen, conn[ci].ctype) && conn[ci].accept_deflate && !UA_IE )
         {
-            DBG("Compressing content");
-
-            int ret;
-static z_stream strm;
-static bool first=TRUE;
-
-            if ( first )
+            if ( conn[ci].static_res==NOT_STATIC )
             {
-                strm.zalloc = Z_NULL;
-                strm.zfree = Z_NULL;
-                strm.opaque = Z_NULL;
+                DBG("Compressing content");
 
-                ret = deflateInit(&strm, COMPRESS_LEVEL);
+                int ret;
+static          z_stream strm;
+static          bool first=TRUE;
 
-                if ( ret != Z_OK )
+                if ( first )
                 {
-                    ERR("deflateInit failed, ret = %d", ret);
-                    return;
+                    strm.zalloc = Z_NULL;
+                    strm.zfree = Z_NULL;
+                    strm.opaque = Z_NULL;
+
+                    ret = deflateInit(&strm, COMPRESS_LEVEL);
+
+                    if ( ret != Z_OK )
+                    {
+                        ERR("deflateInit failed, ret = %d", ret);
+                        return;
+                    }
+
+                    first = FALSE;
                 }
 
-                first = FALSE;
+                unsigned max = conn[ci].clen;
+
+                ret = deflate_inplace(&strm, (unsigned char*)conn[ci].out_data+OUT_HEADER_BUFSIZE, conn[ci].clen, &max);
+
+                if ( ret == Z_OK )
+                {
+                    DBG("Compression success, old len=%u, new len=%u", conn[ci].clen, max);
+                    conn[ci].clen = max;
+                    PRINT_HTTP_CONTENT_ENCODING_DEFLATE;
+                }
+                else
+                {
+                    ERR("deflate_inplace failed, ret = %d", ret);
+                }
             }
-
-            unsigned max = conn[ci].clen;
-
-#ifdef SEND_ALL_AT_ONCE
-            ret = deflate_inplace(&strm, (unsigned char*)conn[ci].out_data+OUT_HEADER_BUFSIZE, conn[ci].clen, &max);
-#else
-            ret = deflate_inplace(&strm, (unsigned char*)conn[ci].out_data, conn[ci].clen, &max);
-#endif
-//            (void)deflateEnd(&strm);
-
-            if ( ret == Z_OK )
+            else if ( M_stat[conn[ci].static_res].len_deflated )   /* compressed static resource is available */
             {
-                DBG("Compression success, old len=%u, new len=%u", conn[ci].clen, max);
-                conn[ci].clen = max;
+                conn[ci].out_data = M_stat[conn[ci].static_res].data_deflated;
+                conn[ci].clen = M_stat[conn[ci].static_res].len_deflated;
                 PRINT_HTTP_CONTENT_ENCODING_DEFLATE;
-            }
-            else
-            {
-                ERR("deflate_inplace failed, ret = %d", ret);
             }
         }
 #endif  /* _WIN32 */
@@ -3343,10 +3562,10 @@ static bool first=TRUE;
     if ( conn[ci].clen == 0 )   /* don't set for these */
     {                   /* this covers 301, 303 and 304 */
     }
-    else if ( conn[ci].static_res != NOT_STATIC )   /* static resource */
-    {
-        print_content_type(ci, M_stat[conn[ci].static_res].type);
-    }
+//    else if ( conn[ci].static_res != NOT_STATIC )   /* static resource */
+//    {
+//        print_content_type(ci, M_stat[conn[ci].static_res].type);
+//    }
     else if ( conn[ci].ctype == CONTENT_TYPE_USER )
     {
         sprintf(G_tmp, "Content-Type: %s\r\n", conn[ci].ctypestr);
@@ -3380,11 +3599,7 @@ static bool first=TRUE;
 
     /* header length */
 
-#ifdef SEND_ALL_AT_ONCE
     conn[ci].out_hlen = conn[ci].p_header - out_header;
-#else
-    conn[ci].out_hlen = conn[ci].p_header - conn[ci].out_header;
-#endif
 
 #ifdef DUMP
     DBG("ci=%d, out_hlen = %u", ci, conn[ci].out_hlen);
@@ -3402,20 +3617,11 @@ static bool first=TRUE;
 #endif
 
 #if OUT_HEADER_BUFSIZE-1 <= MAX_LOG_STR_LEN
-#ifdef SEND_ALL_AT_ONCE
     DBG("\nResponse header:\n\n[%s]\n", out_header);
 #else
-    DBG("\nResponse header:\n\n[%s]\n", conn[ci].out_header);
-#endif
-#else
-#ifdef SEND_ALL_AT_ONCE
     log_long(out_header, conn[ci].out_hlen, "\nResponse header");
-#else
-    log_long(conn[ci].out_header, conn[ci].out_hlen, "\nResponse header");
-#endif
 #endif  /* OUT_HEADER_BUFSIZE-1 <= MAX_LOG_STR_LEN */
 
-#ifdef SEND_ALL_AT_ONCE
     /* ----------------------------------------------------------------- */
     /* try to send everything at once */
     /* copy response header just before the content */
@@ -3425,16 +3631,11 @@ static bool first=TRUE;
     conn[ci].out_len = conn[ci].out_hlen + conn[ci].clen;
 
     /* ----------------------------------------------------------------- */
-#endif
 
 #ifdef DUMP     /* low-level tests */
     if ( G_logLevel>=LOG_DBG && conn[ci].clen > 0 && !conn[ci].head_only && conn[ci].static_res == NOT_STATIC
             && (conn[ci].ctype==RES_TEXT || conn[ci].ctype==RES_JSON) )
-#ifdef SEND_ALL_AT_ONCE
         log_long(conn[ci].out_data+OUT_HEADER_BUFSIZE, conn[ci].clen, "Content to send");
-#else
-        log_long(conn[ci].out_data, conn[ci].clen, "Content to send");
-#endif
 #endif  /* DUMP */
 
     /* ----------------------------------------------------------------- */
@@ -3672,7 +3873,7 @@ static void reset_conn(int ci, char new_state)
 #ifdef ASYNC
     conn[ci].service[0] = EOS;
     conn[ci].async_err_code = OK;
-    conn[ci].ai = -1;
+//    conn[ci].ai = -1;
 #endif
 
     if ( new_state == CONN_STATE_CONNECTED )
@@ -4733,6 +4934,35 @@ int eng_uses_start(int ci, const char *sesid)
 
 
 /* --------------------------------------------------------------------------
+   Invalidate active user sessions belonging to user_id
+   Called after password change
+-------------------------------------------------------------------------- */
+void eng_uses_downgrade_by_uid(long uid, int ci)
+{
+#ifdef USERS
+    int i;
+
+    if ( ci > -1 )  /* keep the current session */
+    {
+        for ( i=1; G_sessions>0 && i<=MAX_SESSIONS; ++i )
+        {
+            if ( uses[i].sesid[0] && uses[i].logged && uses[i].uid==uid && 0!=strcmp(uses[i].sesid, US.sesid) )
+                libusr_luses_downgrade(i, NOT_CONNECTED, FALSE);
+        }
+    }
+    else    /* all sessions */
+    {
+        for ( i=1; G_sessions>0 && i<=MAX_SESSIONS; ++i )
+        {
+            if ( uses[i].sesid[0] && uses[i].logged && uses[i].uid==uid )
+                libusr_luses_downgrade(i, NOT_CONNECTED, FALSE);
+        }
+    }
+#endif  /* USERS */
+}
+
+
+/* --------------------------------------------------------------------------
    Send asynchronous request
 -------------------------------------------------------------------------- */
 void eng_async_req(int ci, const char *service, const char *data, char response, int timeout, int size)
@@ -4741,9 +4971,9 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
 
     async_req_t req;
 
-    if ( G_last_call_id >= 1000000000 ) G_last_call_id = 0;
+    if ( M_last_call_id >= 1000000000 ) M_last_call_id = 0;
 
-    req.hdr.call_id = ++G_last_call_id;
+    req.hdr.call_id = ++M_last_call_id;
     req.hdr.ci = ci;
 
     if ( service )
@@ -4762,7 +4992,19 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
     strcpy(req.hdr.resource, conn[ci].resource);
     strcpy(req.hdr.uagent, conn[ci].uagent);
     req.hdr.mobile = conn[ci].mobile;
+    strcpy(req.hdr.referer, conn[ci].referer);
     req.hdr.clen = conn[ci].clen;
+    strcpy(req.hdr.host, conn[ci].host);
+    strcpy(req.hdr.website, conn[ci].website);
+    strcpy(req.hdr.lang, conn[ci].lang);
+    req.hdr.in_ctype = conn[ci].in_ctype;
+    strcpy(req.hdr.boundary, conn[ci].boundary);
+    req.hdr.status = conn[ci].status;
+    req.hdr.ctype = conn[ci].ctype;
+    strcpy(req.hdr.cookie_out_a, conn[ci].cookie_out_a);
+    strcpy(req.hdr.cookie_out_a_exp, conn[ci].cookie_out_a_exp);
+    strcpy(req.hdr.cookie_out_l, conn[ci].cookie_out_l);
+    strcpy(req.hdr.cookie_out_l_exp, conn[ci].cookie_out_l_exp);
 
     /* For POST, the payload can be in the data space of the message,
        or -- if it's bigger -- in the shared memory */
@@ -4805,13 +5047,6 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
         }
     }
 
-    strcpy(req.hdr.host, conn[ci].host);
-    strcpy(req.hdr.website, conn[ci].website);
-    strcpy(req.hdr.lang, conn[ci].lang);
-    req.hdr.in_ctype = conn[ci].in_ctype;
-    strcpy(req.hdr.boundary, conn[ci].boundary);
-    req.hdr.status = conn[ci].status;
-
     /* pass user session */
 
     if ( conn[ci].usi )
@@ -4821,7 +5056,7 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
         memcpy(&req.hdr.auses, &AUS, sizeof(ausession_t));
 #endif
     }
-    else
+    else    /* no session */
     {
         memset(&req.hdr.uses, 0, sizeof(usession_t));
 #ifndef ASYNC_EXCLUDE_AUSES
@@ -4829,7 +5064,7 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
 #endif
     }
 
-    /* counters */
+    /* globals */
 
     memcpy(&req.hdr.cnts_today, &G_cnts_today, sizeof(counters_t));
     memcpy(&req.hdr.cnts_yesterday, &G_cnts_yesterday, sizeof(counters_t));
@@ -4843,49 +5078,29 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
 
     req.hdr.blacklist_cnt = G_blacklist_cnt;
 
-    /* other */
-
     strcpy(req.hdr.last_modified, G_last_modified);
-
-
-#ifdef ASYNC_USE_APP_CONTINUE   /* depreciated */
-    if ( data )
-    {
-        if ( size )     /* binary */
-            memcpy(req.data, data, size);
-        else    /* text */
-            strcpy(req.data, data);
-    }
-    else
-    {
-        req.data[0] = EOS;
-    }
-#endif  /* ASYNC_USE_APP_CONTINUE */
 
 
     bool found=0;
 
     if ( response )     /* we will wait */
     {
-        /* add to ares (async response array) */
+        /* add to areqs (async response array) */
 
         int j;
 
-        for ( j=0; j<MAX_ASYNC; ++j )
+        for ( j=0; j<MAX_ASYNC_REQS; ++j )
         {
-            if ( ares[j].hdr.state == ASYNC_STATE_FREE )    /* free slot */
+            if ( areqs[j].state == ASYNC_STATE_FREE )    /* free slot */
             {
-                DBG("free slot %d found in ares", j);
-                ares[j].hdr.call_id = req.hdr.call_id;
-                ares[j].hdr.ci = ci;
-                strcpy(ares[j].hdr.service, service);
-                ares[j].hdr.state = ASYNC_STATE_SENT;
-                ares[j].hdr.sent = G_now;
+                DBG("free slot %d found in areqs", j);
+                areqs[j].ci = ci;
+                areqs[j].state = ASYNC_STATE_SENT;
+                areqs[j].sent = G_now;
                 if ( timeout < 0 ) timeout = 0;
                 if ( timeout == 0 || timeout > ASYNC_MAX_TIMEOUT ) timeout = ASYNC_MAX_TIMEOUT;
-                ares[j].hdr.timeout = timeout;
+                areqs[j].timeout = timeout;
                 req.hdr.ai = j;
-                conn[ci].ai = j;
                 found = 1;
                 break;
             }
@@ -4905,13 +5120,13 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
         }
         else
         {
-            ERR("ares is full");
+            ERR("areqs is full");
         }
     }
 
     if ( found || !response )
     {
-        DBG("Sending a message on behalf of ci=%d, call_id=%d, service [%s]", ci, req.hdr.call_id, req.hdr.service);
+        DBG("Sending a message on behalf of ci=%d, call_id=%u, service [%s]", ci, req.hdr.call_id, req.hdr.service);
         if ( mq_send(G_queue_req, (char*)&req, ASYNC_REQ_MSG_SIZE, 0) != 0 )
             ERR("mq_send failed, errno = %d (%s)", errno, strerror(errno));
     }
@@ -4933,8 +5148,6 @@ void silgy_add_to_static_res(const char *name, const char *src)
 
     M_stat[i].len = strlen(src);   /* internal are text based */
 
-#ifdef SEND_ALL_AT_ONCE
-
     if ( NULL == (M_stat[i].data=(char*)malloc(M_stat[i].len+1+OUT_HEADER_BUFSIZE)) )
     {
         ERR("Couldn't allocate %u bytes for %s", M_stat[i].len+1+OUT_HEADER_BUFSIZE, M_stat[i].name);
@@ -4942,18 +5155,6 @@ void silgy_add_to_static_res(const char *name, const char *src)
     }
 
     strcpy(M_stat[i].data+OUT_HEADER_BUFSIZE, src);
-
-#else
-
-    if ( NULL == (M_stat[i].data=(char*)malloc(M_stat[i].len+1)) )
-    {
-        ERR("Couldn't allocate %u bytes for %s", M_stat[i].len+1, M_stat[i].name);
-        return;
-    }
-
-    strcpy(M_stat[i].data, src);
-
-#endif  /* SEND_ALL_AT_ONCE */
 
     M_stat[i].type = get_res_type(M_stat[i].name);
     M_stat[i].modified = G_now;
@@ -5201,7 +5402,7 @@ char        G_res_queue_name[256]="";
 mqd_t       G_queue_req={0};            /* request queue */
 mqd_t       G_queue_res={0};            /* response queue */
 int         G_async_req_data_size=ASYNC_REQ_MSG_SIZE-sizeof(async_req_hdr_t); /* how many bytes are left for data */
-int         G_async_res_data_size=ASYNC_RES_MSG_SIZE-sizeof(async_res_hdr_t); /* how many bytes are left for data */
+int         G_async_res_data_size=ASYNC_RES_MSG_SIZE-sizeof(async_res_hdr_t)-sizeof(int)*4; /* how many bytes are left for data */
 int         G_usersRequireAccountActivation=0;
 async_req_t req;
 async_res_t res;
@@ -5415,7 +5616,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    INF("mq_open %s OK", G_req_queue_name);
+    INF("mq_open of %s OK", G_req_queue_name);
 
     G_queue_res = mq_open(G_res_queue_name, O_WRONLY, NULL, NULL);
 
@@ -5426,7 +5627,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    INF("mq_open %s OK", G_res_queue_name);
+    INF("mq_open of %s OK", G_res_queue_name);
 
     /* ------------------------------------------------------------------- */
 
@@ -5441,7 +5642,7 @@ int main(int argc, char *argv[])
 
     int prev_day = G_ptm->tm_mday;
 
-    INF("Waiting...\n");
+    INF("\nWaiting...\n");
 
     while (1)
     {
@@ -5473,14 +5674,14 @@ int main(int argc, char *argv[])
             DBG_T("Message received");
 
             if ( G_logLevel > LOG_INF )
-                DBG_T("ci=%d, service [%s], call_id=%d", req.hdr.ci, req.hdr.service, req.hdr.call_id);
+                DBG_T("ci=%d, service [%s], call_id=%u", req.hdr.ci, req.hdr.service, req.hdr.call_id);
             else
-                INF_T("%s called (id=%d)", req.hdr.service, req.hdr.call_id);
+                INF_T("%s called (call_id=%u)", req.hdr.service, req.hdr.call_id);
 
-            res.hdr.call_id = req.hdr.call_id;
-            res.hdr.ci = req.hdr.ci;
-            strcpy(res.hdr.service, req.hdr.service);
-            res.hdr.ai = req.hdr.ai;
+            memset(&res, 0, ASYNC_RES_MSG_SIZE);
+
+            res.ai = req.hdr.ai;
+            res.ci = req.hdr.ci;
             strcpy(G_service, req.hdr.service);
 
             /* request details */
@@ -5492,7 +5693,19 @@ int main(int argc, char *argv[])
             strcpy(conn[0].resource, req.hdr.resource);
             strcpy(conn[0].uagent, req.hdr.uagent);
             conn[0].mobile = req.hdr.mobile;
+            strcpy(conn[0].referer, req.hdr.referer);
             conn[0].clen = req.hdr.clen;
+            strcpy(conn[0].host, req.hdr.host);
+            strcpy(conn[0].website, req.hdr.website);
+            strcpy(conn[0].lang, req.hdr.lang);
+            conn[0].in_ctype = req.hdr.in_ctype;
+            strcpy(conn[0].boundary, req.hdr.boundary);
+            conn[0].status = req.hdr.status;
+            conn[0].ctype = req.hdr.ctype;
+            strcpy(conn[0].cookie_out_a, req.hdr.cookie_out_a);
+            strcpy(conn[0].cookie_out_a_exp, req.hdr.cookie_out_a_exp);
+            strcpy(conn[0].cookie_out_l, req.hdr.cookie_out_l);
+            strcpy(conn[0].cookie_out_l_exp, req.hdr.cookie_out_l_exp);
 
             /* For POST, the payload can be in the data space of the message,
                or -- if it's bigger -- in the shared memory */
@@ -5534,25 +5747,6 @@ int main(int argc, char *argv[])
                 }
             }
 
-            strcpy(conn[0].host, req.hdr.host);
-            strcpy(conn[0].website, req.hdr.website);
-            strcpy(conn[0].lang, req.hdr.lang);
-            conn[0].in_ctype = req.hdr.in_ctype;
-            strcpy(conn[0].boundary, req.hdr.boundary);
-            conn[0].status = req.hdr.status;
-
-            /* ----------------------------------------------------------- */
-
-            DBG("Processing...");
-
-            /* response data */
-
-#ifdef OUTCHECKREALLOC
-            p_content = out_data;
-#else
-            p_content = res.data;
-#endif
-
             /* user session */
 
             memcpy(&uses[1], &req.hdr.uses, sizeof(usession_t));
@@ -5564,7 +5758,7 @@ int main(int argc, char *argv[])
             else
                 conn[0].usi = 0;    /* no session */
 
-            /* counters */
+            /* globals */
 
             memcpy(&G_cnts_today, &req.hdr.cnts_today, sizeof(counters_t));
             memcpy(&G_cnts_yesterday, &req.hdr.cnts_yesterday, sizeof(counters_t));
@@ -5578,10 +5772,22 @@ int main(int argc, char *argv[])
 
             G_blacklist_cnt = req.hdr.blacklist_cnt;
 
-            /* other */
-
             strcpy(G_last_modified, req.hdr.last_modified);
 
+            if ( conn[0].usi )
+                lib_set_datetime_formats(US.lang);
+
+            /* ----------------------------------------------------------- */
+
+            DBG("Processing...");
+
+            /* response data */
+
+#ifdef OUTCHECKREALLOC
+            p_content = out_data;
+#else
+            p_content = res.data;
+#endif
             /* ----------------------------------------------------------- */
 
             silgy_svc_main();
@@ -5618,59 +5824,81 @@ int main(int argc, char *argv[])
 #endif
                 /* data */
 
-                int data_len, chunk_num=0, data_sent=0;
+                async_res_data_t resd;   /* different struct for more data */
+                unsigned data_len, chunk_num=0, data_sent;
 #ifdef OUTCHECKREALLOC
                 data_len = p_content - out_data;
 #else
                 data_len = p_content - res.data;
 #endif
-                DBG("data_len = %d", data_len);
+                DBG("data_len = %u", data_len);
 
-                res.hdr.chunk = ASYNC_CHUNK_FIRST;
+                res.chunk = ASYNC_CHUNK_FIRST;
 
-                if ( data_len < G_async_res_data_size )
+                G_async_res_data_size = ASYNC_RES_MSG_SIZE-sizeof(async_res_hdr_t)-sizeof(int)*4;
+
+                if ( data_len <= G_async_res_data_size )
                 {
-                    res.hdr.clen = data_len;
+                    res.len = data_len;
 #ifdef OUTCHECKREALLOC
-                    memcpy(res.data, out_data, res.hdr.clen);
+                    memcpy(res.data, out_data, res.len);
 #endif
-                    res.hdr.chunk |= ASYNC_CHUNK_LAST;
-                    data_sent = data_len;
+                    res.chunk |= ASYNC_CHUNK_LAST;
                 }
 #ifdef OUTCHECKREALLOC
                 else    /* we'll need more than one chunk */
                 {
-                    res.hdr.clen = G_async_res_data_size;
-                    memcpy(res.data, out_data, res.hdr.clen);
-                    data_sent = data_len - res.hdr.clen;
+                    /* 0-th chunk */
+
+                    res.len = G_async_res_data_size;
+                    memcpy(res.data, out_data, res.len);
+
+                    /* prepare the new struct for chunks > 0 */
+
+                    resd.ai = req.hdr.ai;
+                    resd.ci = req.hdr.ci;
+
+                    G_async_res_data_size = ASYNC_RES_MSG_SIZE-sizeof(int)*4;
                 }
 
-                /* send */
+                /* send first chunk (res) */
+
+                DBG("Sending 0-th chunk, chunk data length = %d", res.len);
 
                 if ( mq_send(G_queue_res, (char*)&res, ASYNC_RES_MSG_SIZE, 0) != 0 )
                     ERR("mq_send failed, errno = %d (%s)", errno, strerror(errno));
 
+                data_sent = res.len;
+
+                DBG("data_sent = %u", data_sent);
+
+                /* next chunks if required (resd) */
+
                 while ( data_sent < data_len )
                 {
-                    DBG("Sending %d-th chunk...", ++chunk_num);
+                    resd.chunk = ++chunk_num;
 
-                    res.hdr.chunk = chunk_num;
-
-                    if ( data_len-data_sent < G_async_res_data_size )   /* last chunk */
+                    if ( data_len-data_sent <= G_async_res_data_size )   /* last chunk */
                     {
-                        res.hdr.clen = data_len - data_sent;
-                        res.hdr.chunk |= ASYNC_CHUNK_LAST;
+                        DBG("data_len-data_sent = %d, last chunk...", data_len-data_sent);
+                        resd.len = data_len - data_sent;
+                        resd.chunk |= ASYNC_CHUNK_LAST;
                     }
                     else
                     {
-                        res.hdr.clen = G_async_res_data_size;
+                        resd.len = G_async_res_data_size;
                     }
 
-                    memcpy(res.data, out_data+data_sent, res.hdr.clen);
-                    data_sent += res.hdr.clen;
+                    memcpy(resd.data, out_data+data_sent, resd.len);
 
-                    if ( mq_send(G_queue_res, (char*)&res, ASYNC_RES_MSG_SIZE, 0) != 0 )
+                    DBG("Sending %u-th chunk, chunk data length = %d", chunk_num, resd.len);
+
+                    if ( mq_send(G_queue_res, (char*)&resd, ASYNC_RES_MSG_SIZE, 0) != 0 )
                         ERR("mq_send failed, errno = %d (%s)", errno, strerror(errno));
+
+                    data_sent += resd.len;
+
+                    DBG("data_sent = %u", data_sent);
                 }
 
 #endif  /* OUTCHECKREALLOC */
@@ -5691,6 +5919,67 @@ int main(int argc, char *argv[])
     clean_up();
 
     return EXIT_SUCCESS;
+}
+
+
+/* --------------------------------------------------------------------------
+   Start new anonymous user session
+
+   It's passed back to the gateway (silgy_app)
+   which really then starts a new session.
+
+   It is optimistically assumed here that in the meantime MAX_SESSIONS
+   won't be reached in any of the silgy_* processes.
+-------------------------------------------------------------------------- */
+int eng_uses_start(int ci, const char *sesid)
+{
+    char new_sesid[SESID_LEN+1];
+
+    DBG("eng_uses_start");
+
+    if ( G_sessions == MAX_SESSIONS )
+    {
+        WAR("User sessions exhausted");
+        return ERR_SERVER_TOOBUSY;
+    }
+
+    ++G_sessions;
+
+    conn[ci].usi = 1;
+
+    silgy_random(new_sesid, SESID_LEN);
+
+    INF("Starting new session, sesid [%s]", new_sesid);
+
+    strcpy(US.sesid, new_sesid);
+    strcpy(US.ip, conn[ci].ip);
+    strcpy(US.uagent, conn[ci].uagent);
+    strcpy(US.referer, conn[ci].referer);
+    strcpy(US.lang, conn[ci].lang);
+
+    lib_set_datetime_formats(US.lang);
+
+    /* set 'as' cookie */
+
+    strcpy(conn[ci].cookie_out_a, new_sesid);
+
+    DBG("%d user session(s)", G_sessions);
+
+    if ( G_sessions > G_sessions_hwm )
+        G_sessions_hwm = G_sessions;
+
+    return OK;
+}
+
+
+/* --------------------------------------------------------------------------
+   Invalidate active user sessions belonging to user_id
+   Called after password change
+-------------------------------------------------------------------------- */
+void eng_uses_downgrade_by_uid(long uid, int ci)
+{
+    res.hdr.invalidate_uid = uid;
+    res.hdr.invalidate_ci = ci;
 }
 
 

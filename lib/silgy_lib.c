@@ -279,7 +279,7 @@ bool lib_open_db()
 
     if ( NULL == (G_dbconn=mysql_init(NULL)) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return FALSE;
     }
 
@@ -293,7 +293,7 @@ bool lib_open_db()
 
     if ( NULL == mysql_real_connect(G_dbconn, G_dbHost[0]?G_dbHost:NULL, G_dbUser, G_dbPassword, G_dbName, G_dbPort, NULL, 0) )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         return FALSE;
     }
 #endif
@@ -873,113 +873,89 @@ bool get_qs_param_sql_esc(int ci, const char *fieldname, char *retbuf)
 
 
 /* --------------------------------------------------------------------------
-   Get query string value. Return TRUE if found.
+   Get the query string value. Return TRUE if found.
 -------------------------------------------------------------------------- */
 bool get_qs_param_raw(int ci, const char *fieldname, char *retbuf, int maxlen)
 {
-    char *querystring, *end;
+    char *qs, *end;
 
 #ifdef DUMP
     DBG("get_qs_param_raw: fieldname [%s]", fieldname);
 #endif
 
-    int fnamelen = strlen(fieldname);
-
     if ( conn[ci].post )
     {
-        querystring = conn[ci].in_data;
-        end = querystring + conn[ci].clen;
+        if ( conn[ci].in_ctype != CONTENT_TYPE_URLENCODED && conn[ci].in_ctype != CONTENT_TYPE_UNSET )
+        {
+            WAR("Invalid Content-Type");
+            if ( retbuf ) retbuf[0] = EOS;
+            return FALSE;
+        }
+        qs = conn[ci].in_data;
+        end = qs + conn[ci].clen;
     }
     else
     {
-        querystring = strchr(conn[ci].uri, '?');
+        qs = strchr(conn[ci].uri, '?');
     }
 
-    if ( querystring == NULL )
+    if ( qs == NULL )
     {
         if ( retbuf ) retbuf[0] = EOS;
-        return FALSE;    /* no question mark => no values */
+        return FALSE;
     }
 
-    if ( !conn[ci].post )
+    if ( !conn[ci].post )   /* GET */
     {
-        ++querystring;      /* skip the question mark */
-        end = querystring + (strlen(conn[ci].uri) - (querystring-conn[ci].uri));
+        ++qs;      /* skip the question mark */
+        end = qs + (strlen(conn[ci].uri) - (qs-conn[ci].uri));
+#ifdef DUMP
+        DBG("get_qs_param_raw: qs len = %d", strlen(conn[ci].uri) - (qs-conn[ci].uri));
+#endif
     }
 
-#ifdef DUMP
-    DBG("get_qs_param_raw: before loop");
-#endif
+    int fnamelen = strlen(fieldname);
 
-    char *p, *equals, *ampersand;
-    int  len1;      /* fieldname len */
-    int  len2;      /* value len */
-    int  vallen;    /* returned value length */
+    char *val = qs;
 
-    for ( p=querystring; p<end; )
+    while ( val < end )
     {
-        equals = strchr(p, '=');    /* end of field name */
-        ampersand = strchr(p, '&');    /* end of value */
+        val = strstr(val, fieldname);
 
-        if ( ampersand )   /* more than one field */
+        if ( val == NULL )
         {
-            len2 = ampersand - p;
-        }
-        else    /* no ampersand ==> only one field */
-        {
-            if ( !equals )
-            {
-#ifdef DUMP
-                DBG("get_qs_param_raw: no ampersand, no equals, returning FALSE");
-#endif
-                return FALSE;
-            }
-            else
-                len2 = strlen(p);
+            if ( retbuf ) retbuf[0] = EOS;
+            return FALSE;
         }
 
-        if ( !equals || (ampersand && equals>ampersand) )
+        if ( val != qs && *(val-1) != '&' )
         {
-            /* no '=' present in this field, move to next */
-            ampersand += len2;
+            ++val;
             continue;
         }
 
-        len1 = equals - p;   /* field name length */
+        val += fnamelen;
 
-        if ( len1 == fnamelen && strncmp(fieldname, p, len1) == 0 )   /* found it */
-        {
-            if ( retbuf )
-            {
-                vallen = len2 - len1 - 1;
-                if ( vallen > maxlen )
-                    vallen = maxlen;
-
-                strncpy(retbuf, equals+1, vallen);
-                retbuf[vallen] = EOS;
-#ifdef DUMP
-                DBG("get_qs_param_raw: retbuf [%s]", retbuf);
-#endif
-            }
-
-            return TRUE;
-        }
-
-        /* try next value */
-
-        p += len2;      /* skip current value */
-        if ( *p == '&' ) ++p;   /* skip '&' */
+        if ( *val == '=' )   /* found */
+            break;
     }
 
-    /* not found */
+    ++val;  /* skip '=' */
 
-    if ( retbuf ) retbuf[0] = EOS;
+    /* copy the value */
+
+    int i=0;
+
+    while ( *val && *val != '&' && i<maxlen )
+        retbuf[i++] = *val++;
+
+    retbuf[i] = EOS;
 
 #ifdef DUMP
-    DBG("get_qs_param_raw: returning FALSE");
+    DBG("get_qs_param_raw: retbuf [%s]", retbuf);
 #endif
 
-    return FALSE;
+    return TRUE;
 }
 
 
@@ -1250,7 +1226,7 @@ void lib_set_res_content_type(int ci, const char *str)
 -------------------------------------------------------------------------- */
 void lib_set_res_location(int ci, const char *str, ...)
 {
-    va_list     plist;
+    va_list plist;
 
     va_start(plist, str);
     vsprintf(conn[ci].location, str, plist);
@@ -1263,7 +1239,7 @@ void lib_set_res_location(int ci, const char *str, ...)
 -------------------------------------------------------------------------- */
 void lib_set_res_content_disposition(int ci, const char *str, ...)
 {
-    va_list     plist;
+    va_list plist;
 
     va_start(plist, str);
     vsprintf(conn[ci].cdisp, str, plist);
@@ -1277,8 +1253,8 @@ void lib_set_res_content_disposition(int ci, const char *str, ...)
 -------------------------------------------------------------------------- */
 void lib_send_msg_description(int ci, int code)
 {
-    char    cat[1024]=MSG_CAT_ERROR;
-    char    msg[1024]="";
+    char cat[256]=MSG_CAT_ERROR;
+    char msg[1024]="";
 
     if ( code == OK )
     {
@@ -1368,10 +1344,10 @@ static void format_counters(counters_fmt_t *s, counters_t *n)
 static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
 {
 #ifdef DBMYSQL
-    char        sql_query[SQLBUF];
+    char        sql[SQLBUF];
     MYSQL_RES   *result;
-    MYSQL_ROW   sql_row;
-    long        sql_records;
+    MYSQL_ROW   row;
+    unsigned    records;
 
     char ai_sql[SQLBUF]="";
 
@@ -1386,17 +1362,17 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
         }
     }
 
-    sprintf(sql_query, "SELECT id, login, email, name, status, created, last_login, visits%s FROM users ORDER BY last_login DESC", ai_sql);
+    sprintf(sql, "SELECT id, login, email, name, status, created, last_login, visits%s FROM users ORDER BY last_login DESC, created DESC", ai_sql);
 
-    DBG("sql_query: %s", sql_query);
+    DBG("sql: %s", sql);
 
-    mysql_query(G_dbconn, sql_query);
+    mysql_query(G_dbconn, sql);
 
     result = mysql_store_result(G_dbconn);
 
     if ( !result )
     {
-        ERR("Error %u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         OUT("<p>Error %u: %s</p>", mysql_errno(G_dbconn), mysql_error(G_dbconn));
         RES_STATUS(500);
         return;
@@ -1404,16 +1380,16 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
 
     OUT("<h2>Users</h2>");
 
-    sql_records = mysql_num_rows(result);
+    records = mysql_num_rows(result);
 
-    DBG("admin: %ld record(s) found", sql_records);
+    DBG("admin: %u record(s) found", records);
 
-    int last_to_show = sql_records<rows?sql_records:rows;
+    int last_to_show = records<rows?records:rows;
 
     char formatted1[64];
     char formatted2[64];
 
-    amt(formatted1, sql_records);
+    amt(formatted1, records);
     amt(formatted2, last_to_show);
     OUT("<p>%s users, showing %s of last seen</p>", formatted1, formatted2);
 
@@ -1441,14 +1417,14 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
 
     OUT("</tr>");
 
-//    long    id;                     /* sql_row[0] */
-//    char    login[LOGIN_LEN+1];     /* sql_row[1] */
-//    char    email[EMAIL_LEN+1];     /* sql_row[2] */
-//    char    name[UNAME_LEN+1];      /* sql_row[3] */
-//    short   status;                 /* sql_row[4] */
-//    char    created[32];            /* sql_row[5] */
-//    char    last_login[32];         /* sql_row[6] */
-//    long    visits;                 /* sql_row[7] */
+//    long    id;                     /* row[0] */
+//    char    login[LOGIN_LEN+1];     /* row[1] */
+//    char    email[EMAIL_LEN+1];     /* row[2] */
+//    char    name[UNAME_LEN+1];      /* row[3] */
+//    short   status;                 /* row[4] */
+//    char    created[32];            /* row[5] */
+//    char    last_login[32];         /* row[6] */
+//    long    visits;                 /* row[7] */
 
     char fmt0[64];  /* id */
     char fmt7[64];  /* visits */
@@ -1462,12 +1438,12 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
 
     for ( i=0; i<last_to_show; ++i )
     {
-        sql_row = mysql_fetch_row(result);
+        row = mysql_fetch_row(result);
 
-        amt(fmt0, atol(sql_row[0]));    /* id */
-        amt(fmt7, atol(sql_row[7]));    /* visits */
+        amt(fmt0, atol(row[0]));    /* id */
+        amt(fmt7, atol(row[7]));    /* visits */
 
-        if ( atoi(sql_row[4]) != USER_STATUS_ACTIVE )
+        if ( atoi(row[4]) != USER_STATUS_ACTIVE )
             strcpy(trstyle, " class=g");
         else
             trstyle[0] = EOS;
@@ -1484,26 +1460,26 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
                 if ( 0==strcmp(ai[j].type, "int") )
                 {
                     strcat(ai_td, "<td class=r>");
-                    amt(ai_fmt, atoi(sql_row[j+8]));
+                    amt(ai_fmt, atoi(row[j+8]));
                     strcat(ai_td, ai_fmt);
                 }
                 else if ( 0==strcmp(ai[j].type, "long") )
                 {
                     strcat(ai_td, "<td class=r>");
-                    amt(ai_fmt, atol(sql_row[j+8]));
+                    amt(ai_fmt, atol(row[j+8]));
                     strcat(ai_td, ai_fmt);
                 }
                 else if ( 0==strcmp(ai[j].type, "float") || 0==strcmp(ai[j].type, "double") )
                 {
                     strcat(ai_td, "<td class=r>");
-                    sscanf(sql_row[j+8], "%f", &ai_double);
+                    sscanf(row[j+8], "%f", &ai_double);
                     amtd(ai_fmt, ai_double);
                     strcat(ai_td, ai_fmt);
                 }
                 else    /* string */
                 {
                     strcat(ai_td, "<td>");
-                    strcat(ai_td, sql_row[j+8]);
+                    strcat(ai_td, row[j+8]);
                 }
 
                 strcat(ai_td, "</td>");
@@ -1511,9 +1487,9 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
         }
 
         if ( REQ_DSK )
-            OUT("<td class=r>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=r>%s</td>%s", fmt0, sql_row[1], sql_row[2], sql_row[3], sql_row[5], sql_row[6], fmt7, ai_td);
+            OUT("<td class=r>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=r>%s</td>%s", fmt0, row[1], row[2], row[3], row[5], row[6], fmt7, ai_td);
         else
-            OUT("<td class=r>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=r>%s</td>%s", fmt0, sql_row[1], sql_row[2], sql_row[6], fmt7, ai_td);
+            OUT("<td class=r>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=r>%s</td>%s", fmt0, row[1], row[2], row[6], fmt7, ai_td);
 
         OUT("</tr>");
     }
@@ -1903,6 +1879,8 @@ static int rest_render_req(char *buffer, const char *method, const char *host, c
     p = stpcpy(p, host);
     p = stpcpy(p, "\r\n");
 
+    char jtmp[JSON_BUFSIZE];
+
     if ( 0 != strcmp(method, "GET") && req )
     {
         if ( json )     /* JSON -> string conversion */
@@ -1910,7 +1888,7 @@ static int rest_render_req(char *buffer, const char *method, const char *host, c
             if ( !rest_header_present("Content-Type") )
                 p = stpcpy(p, "Content-Type: application/json\r\n");
 
-            strcpy(G_tmp, lib_json_to_string((JSON*)req));
+            strcpy(jtmp, lib_json_to_string((JSON*)req));
         }
         else
         {
@@ -1918,7 +1896,7 @@ static int rest_render_req(char *buffer, const char *method, const char *host, c
                 p = stpcpy(p, "Content-Type: application/x-www-form-urlencoded\r\n");
         }
         char tmp[64];
-        sprintf(tmp, "Content-Length: %ld\r\n", (long)strlen(json?G_tmp:(char*)req));
+        sprintf(tmp, "Content-Length: %ld\r\n", (long)strlen(json?jtmp:(char*)req));
         p = stpcpy(p, tmp);
     }
 
@@ -1966,7 +1944,7 @@ static int rest_render_req(char *buffer, const char *method, const char *host, c
     /* body */
 
     if ( 0 != strcmp(method, "GET") && req )
-        p = stpcpy(p, json?G_tmp:(char*)req);
+        p = stpcpy(p, json?jtmp:(char*)req);
 
     *p = EOS;
 
@@ -2422,7 +2400,7 @@ static int chunked2content(char *res_content, const char *buffer, int src_len, i
 /* --------------------------------------------------------------------------
    REST call / parse response
 -------------------------------------------------------------------------- */
-bool lib_rest_res_parse(char *res_header, unsigned bytes)
+bool lib_rest_res_parse(char *res_header, int bytes)
 {
     /* HTTP/1.1 200 OK <== 15 chars */
 
@@ -2433,9 +2411,9 @@ bool lib_rest_res_parse(char *res_header, unsigned bytes)
         res_header[bytes] = EOS;
 #ifdef DUMP
         DBG("");
-        DBG("Got %u bytes of response [%s]", bytes, res_header);
+        DBG("Got %d bytes of response [%s]", bytes, res_header);
 #else
-        DBG("Got %u bytes of response", bytes);
+        DBG("Got %d bytes of response", bytes);
 #endif  /* DUMP */
 
         /* Status */
@@ -6655,7 +6633,7 @@ void log_flush()
 void log_finish()
 {
     if ( G_logLevel > 0 )
-        ALWAYS("Closing log");
+        ALWAYS_T("Closing log");
 
     if ( M_log_fd != NULL && M_log_fd != stdout )
     {
