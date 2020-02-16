@@ -57,22 +57,22 @@
 #include <cctype>
 #else   /* C */
 #include <ctype.h>
-typedef char                        bool;
-#define false                       ((char)0)
-#define true                        ((char)1)
+typedef char                            bool;
+#define false                           ((char)0)
+#define true                            ((char)1)
 #endif  /* __cplusplus */
 
 
-#define WEB_SERVER_VERSION          "4.3.1"
+#define WEB_SERVER_VERSION              "4.5.5"
 /* alias */
-#define SILGY_VERSION               WEB_SERVER_VERSION
+#define SILGY_VERSION                   WEB_SERVER_VERSION
 
 
 #ifndef FALSE
-#define FALSE                       false
+#define FALSE                           false
 #endif
 #ifndef TRUE
-#define TRUE                        true
+#define TRUE                            true
 #endif
 
 
@@ -85,6 +85,76 @@ typedef char str8k[1024*8];
 typedef char str16k[1024*16];
 typedef char str32k[1024*32];
 typedef char str64k[1024*64];
+
+
+#define OK                              0
+#define SUCCEED                         OK
+#define FAIL                            -1
+
+#define EOS                             ((char)0)       /* End Of String */
+
+
+/* log levels */
+
+#define LOG_ALWAYS                      0               /* print always */
+#define LOG_ERR                         1               /* print errors only */
+#define LOG_WAR                         2               /* print errors and warnings */
+#define LOG_INF                         3               /* print errors and warnings and info */
+#define LOG_DBG                         4               /* for debug mode -- most detailed */
+
+
+#define MAX_URI_VAL_LEN                 255             /* max value length received in URI -- sufficient for 99% cases */
+#define MAX_LONG_URI_VAL_LEN            65535           /* max long value length received in URI -- 64 kB - 1 B */
+
+#define QSBUF                           MAX_URI_VAL_LEN+1
+#define QS_BUF                          QSBUF
+
+#define WEBSITE_LEN                     63
+#define CONTENT_TYPE_LEN                63
+#define CONTENT_DISP_LEN                127
+
+#define LOGIN_LEN                       30
+#define EMAIL_LEN                       120
+#define UNAME_LEN                       120
+#define PHONE_LEN                       30
+#define ABOUT_LEN                       250
+
+
+#define VIEW_DEFAULT                    '0'
+#define VIEW_DESKTOP                    '1'
+#define VIEW_MOBILE                     '2'
+
+
+#define SQLBUF                          4096            /* SQL query buffer size */
+
+
+
+/* UTF-8 */
+
+#define CHAR_POUND                      "&#163;"
+#define CHAR_COPYRIGHT                  "&#169;"
+#define CHAR_N_ACUTE                    "&#324;"
+#define CHAR_DOWN_ARROWHEAD1            "&#709;"
+#define CHAR_LONG_DASH                  "&#8212;"
+#define CHAR_EURO                       "&#8364;"
+#define CHAR_UP                         "&#8593;"
+#define CHAR_DOWN                       "&#8595;"
+#define CHAR_MINUS                      "&#8722;"
+#define CHAR_VEL                        "&#8744;"
+#define CHAR_VERTICAL_ELLIPSIS          "&#8942;"
+#define CHAR_COUNTERSINK                "&#9013;"
+#define CHAR_DOUBLE_TRIANGLE_U          "&#9195;"
+#define CHAR_DOUBLE_TRIANGLE_D          "&#9196;"
+#define CHAR_DOWN_TRIANGLE_B            "&#9660;"
+#define CHAR_DOWN_TRIANGLE_W            "&#9661;"
+#define CHAR_CLOSE                      "&#10005;"
+#define CHAR_HEAVY_PLUS                 "&#10133;"
+#define CHAR_HEAVY_MINUS                "&#10134;"
+#define CHAR_DOWN_ARROWHEAD2            "&#65088;"
+#define CHAR_FULLW_PLUS                 "&#65291;"
+#define CHAR_LESS_EQUAL                 "&#8804;"
+#define CHAR_GREATER_EQUAL              "&#8805;"
+
 
 
 #include "silgy_app.h"
@@ -130,19 +200,6 @@ typedef char str64k[1024*64];
 #endif
 
 
-#define OK                          0
-#define SUCCEED                     OK
-#define FAIL                        -1
-#define EOS                         ((char)0)       /* End Of String */
-
-/* log levels */
-
-#define LOG_ALWAYS                  0               /* print always */
-#define LOG_ERR                     1               /* print errors only */
-#define LOG_WAR                     2               /* print errors and warnings */
-#define LOG_INF                     3               /* print errors and warnings and info */
-#define LOG_DBG                     4               /* for debug mode -- most detailed */
-
 /* request macros */
 
 #define REQ_METHOD                  conn[ci].method
@@ -150,6 +207,7 @@ typedef char str64k[1024*64];
 #define REQ_POST                    (0==strcmp(conn[ci].method, "POST"))
 #define REQ_PUT                     (0==strcmp(conn[ci].method, "PUT"))
 #define REQ_DELETE                  (0==strcmp(conn[ci].method, "DELETE"))
+#define REQ_OPTIONS                 (0==strcmp(conn[ci].method, "OPTIONS"))
 #define REQ_URI                     conn[ci].uri
 #define REQ_CONTENT_TYPE            conn[ci].in_ctypestr
 #define REQ_DSK                     !conn[ci].mobile
@@ -169,8 +227,10 @@ typedef char str64k[1024*64];
 #ifndef MEM_XLARGE
 #ifndef MEM_XXLARGE
 #ifndef MEM_XXXLARGE
+#ifndef MEM_XXXXLARGE
 #ifndef MEM_SMALL
 #define MEM_SMALL   /* default memory model */
+#endif
 #endif
 #endif
 #endif
@@ -229,9 +289,28 @@ typedef char str64k[1024*64];
     #define OUT(...)                        (sprintf(G_tmp, EXPAND_VA(__VA_ARGS__)), OUTSS(G_tmp))
 #else   /* GCC */
     #define OUTM(str, ...)                  (sprintf(G_tmp, str, __VA_ARGS__), OUTSS(G_tmp))   /* OUT with multiple args */
-    #define CHOOSE_OUT(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, NAME, ...) NAME          /* single or multiple? */
-    #define OUT(...)                        CHOOSE_OUT(__VA_ARGS__, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTSS)(__VA_ARGS__)
+    #define CHOOSE_OUT(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, NAME, ...) NAME          /* single or multiple? */
+    #define OUT(...)                        CHOOSE_OUT(__VA_ARGS__, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTM, OUTSS)(__VA_ARGS__)
 #endif  /* _MSC_VER */
+
+
+/* convenient & fast string building */
+
+#define OUTP_BEGIN(buf)                 char *p4outp=buf
+
+#define OUTPS(str)                      (p4outp = stpcpy(p4outp, str))
+
+#ifdef _MSC_VER /* Microsoft compiler */
+    #define OUTP(...)                        (sprintf(G_tmp, EXPAND_VA(__VA_ARGS__)), OUTPS(G_tmp))
+#else   /* GCC */
+    #define OUTPM(str, ...)                  (sprintf(G_tmp, str, __VA_ARGS__), OUTPS(G_tmp))   /* OUTP with multiple args */
+    #define CHOOSE_OUTP(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, NAME, ...) NAME          /* single or multiple? */
+    #define OUTP(...)                        CHOOSE_OUTP(__VA_ARGS__, OUTPM, OUTPM, OUTPM, OUTPM, OUTPM, OUTPM, OUTPM, OUTPM, OUTPM, OUTPM, OUTPM, OUTPM, OUTPM, OUTPS)(__VA_ARGS__)
+#endif  /* _MSC_VER */
+
+#define OUTP_END                        *p4outp = EOS
+
+
 
 /* HTTP header -- resets respbuf! */
 #define PRINT_HTTP_STATUS(val)          (sprintf(G_tmp, "HTTP/1.1 %d %s\r\n", val, get_http_descr(val)), HOUT(G_tmp))
@@ -257,26 +336,50 @@ typedef char str64k[1024*64];
 /* content language */
 #define PRINT_HTTP_LANGUAGE             HOUT("Content-Language: en-us\r\n")
 
-/* framing */
-#define PRINT_HTTP_FRAME_OPTIONS        HOUT("X-Frame-Options: SAMEORIGIN\r\n")
-
-/* cookie */
-#define PRINT_HTTP_COOKIE_A(ci)         (sprintf(G_tmp, "Set-Cookie: as=%s; HttpOnly\r\n", conn[ci].cookie_out_a), HOUT(G_tmp))
-#define PRINT_HTTP_COOKIE_L(ci)         (sprintf(G_tmp, "Set-Cookie: ls=%s; HttpOnly\r\n", conn[ci].cookie_out_l), HOUT(G_tmp))
-#define PRINT_HTTP_COOKIE_A_EXP(ci)     (sprintf(G_tmp, "Set-Cookie: as=%s; Expires=%s; HttpOnly\r\n", conn[ci].cookie_out_a, conn[ci].cookie_out_a_exp), HOUT(G_tmp))
-#define PRINT_HTTP_COOKIE_L_EXP(ci)     (sprintf(G_tmp, "Set-Cookie: ls=%s; Expires=%s; HttpOnly\r\n", conn[ci].cookie_out_l, conn[ci].cookie_out_l_exp), HOUT(G_tmp))
-
 /* content length */
 #define PRINT_HTTP_CONTENT_LEN(len)     (sprintf(G_tmp, "Content-Length: %u\r\n", len), HOUT(G_tmp))
 
 /* content encoding */
 #define PRINT_HTTP_CONTENT_ENCODING_DEFLATE HOUT("Content-Encoding: deflate\r\n")
 
+/* Security ------------------------------------------------------------------ */
+
 /* HSTS */
 #ifndef HSTS_MAX_AGE
 #define HSTS_MAX_AGE                    31536000    /* a year */
 #endif
+#ifdef HSTS_INCLUDE_SUBDOMAINS
+#define PRINT_HTTP_HSTS                 (sprintf(G_tmp, "Strict-Transport-Security: max-age=%d; includeSubDomains\r\n", HSTS_MAX_AGE), HOUT(G_tmp))
+#else
 #define PRINT_HTTP_HSTS                 (sprintf(G_tmp, "Strict-Transport-Security: max-age=%d\r\n", HSTS_MAX_AGE), HOUT(G_tmp))
+#endif
+
+#ifdef HTTPS
+#ifndef NO_HSTS
+#if HSTS_MAX_AGE > 0
+#define HSTS_ON
+#endif
+#endif
+#endif
+
+/* cookie */
+#ifdef HSTS_ON
+#define PRINT_HTTP_COOKIE_A(ci)         (sprintf(G_tmp, "Set-Cookie: as=%s; %sHttpOnly\r\n", conn[ci].cookie_out_a, G_test?"":"secure; "), HOUT(G_tmp))
+#define PRINT_HTTP_COOKIE_L(ci)         (sprintf(G_tmp, "Set-Cookie: ls=%s; %sHttpOnly\r\n", conn[ci].cookie_out_l, G_test?"":"secure; "), HOUT(G_tmp))
+#define PRINT_HTTP_COOKIE_A_EXP(ci)     (sprintf(G_tmp, "Set-Cookie: as=%s; expires=%s; %sHttpOnly\r\n", conn[ci].cookie_out_a, conn[ci].cookie_out_a_exp, G_test?"":"secure; "), HOUT(G_tmp))
+#define PRINT_HTTP_COOKIE_L_EXP(ci)     (sprintf(G_tmp, "Set-Cookie: ls=%s; expires=%s; %sHttpOnly\r\n", conn[ci].cookie_out_l, conn[ci].cookie_out_l_exp, G_test?"":"secure; "), HOUT(G_tmp))
+#else
+#define PRINT_HTTP_COOKIE_A(ci)         (sprintf(G_tmp, "Set-Cookie: as=%s; HttpOnly\r\n", conn[ci].cookie_out_a), HOUT(G_tmp))
+#define PRINT_HTTP_COOKIE_L(ci)         (sprintf(G_tmp, "Set-Cookie: ls=%s; HttpOnly\r\n", conn[ci].cookie_out_l), HOUT(G_tmp))
+#define PRINT_HTTP_COOKIE_A_EXP(ci)     (sprintf(G_tmp, "Set-Cookie: as=%s; expires=%s; HttpOnly\r\n", conn[ci].cookie_out_a, conn[ci].cookie_out_a_exp), HOUT(G_tmp))
+#define PRINT_HTTP_COOKIE_L_EXP(ci)     (sprintf(G_tmp, "Set-Cookie: ls=%s; expires=%s; HttpOnly\r\n", conn[ci].cookie_out_l, conn[ci].cookie_out_l_exp), HOUT(G_tmp))
+#endif
+
+/* framing */
+#define PRINT_HTTP_SAMEORIGIN           HOUT("X-Frame-Options: SAMEORIGIN\r\n")
+
+/* content type guessing */
+#define PRINT_HTTP_NOSNIFF              HOUT("X-Content-Type-Options: nosniff\r\n")
 
 /* identity */
 #define PRINT_HTTP_SERVER               HOUT("Server: Silgy\r\n")
@@ -286,10 +389,20 @@ typedef char str64k[1024*64];
 
 
 #define OUT_HEADER_BUFSIZE              4096            /* response header buffer length */
-#define TMP_BUFSIZE                     1048576         /* temporary string buffer size (1 MB) */
-#ifndef MAX_PAYLOAD_SIZE
-#define MAX_PAYLOAD_SIZE                16777216        /* max incoming POST data length (16 MB) */
+
+
+#ifndef CUST_HDR_LEN
+#define CUST_HDR_LEN                    255
 #endif
+
+#ifndef MAX_HOSTS                                       /* M_hosts size */
+#define MAX_HOSTS                       10
+#endif
+
+#ifndef MAX_PAYLOAD_SIZE                                /* max incoming POST data length (16 MB) */
+#define MAX_PAYLOAD_SIZE                16777216
+#endif
+
 #define MAX_LOG_STR_LEN                 4095            /* max log string length */
 #define MAX_METHOD_LEN                  7               /* method length */
 #define MAX_URI_LEN                     2047            /* max request URI length */
@@ -330,11 +443,20 @@ typedef char str64k[1024*64];
 #define OUT_BUFSIZE                     262144          /* initial HTTP response buffer length (256 kB) */
 #define MAX_CONNECTIONS                 20000           /* max TCP connections */
 #define MAX_SESSIONS                    10000           /* max user sessions */
+#elif defined MEM_XXXXLARGE
+#define IN_BUFSIZE                      8192            /* incoming request buffer length (8 kB) */
+#define OUT_BUFSIZE                     262144          /* initial HTTP response buffer length (256 kB) */
+#define MAX_CONNECTIONS                 50000           /* max TCP connections */
+#define MAX_SESSIONS                    25000           /* max user sessions */
 #else   /* MEM_SMALL -- default */
 #define IN_BUFSIZE                      8192            /* incoming request buffer length (8 kB) */
 #define OUT_BUFSIZE                     131072          /* initial HTTP response buffer length (128 kB) */
 #define MAX_CONNECTIONS                 20              /* max TCP connections */
 #define MAX_SESSIONS                    10              /* max user sessions */
+#endif
+
+#ifndef TMP_BUFSIZE                                     /* temporary string buffer size */
+#define TMP_BUFSIZE                     OUT_BUFSIZE
 #endif
 
 #ifdef SILGY_SVC
@@ -380,6 +502,8 @@ typedef char str64k[1024*64];
 #define MONOTONIC_CLOCK_NAME            CLOCK_MONOTONIC
 #endif
 
+#define STR(str)                        lib_get_string(ci, str)
+
 #ifndef MAX_BLACKLIST
 #define MAX_BLACKLIST                   10000
 #endif
@@ -397,11 +521,8 @@ typedef char str64k[1024*64];
 #define APP_VERSION                     "1.0"
 #endif
 #ifndef APP_LOGIN_URI
-#define APP_LOGIN_URI                   "login"
+#define APP_LOGIN_URI                   "/login"
 #endif
-
-
-#define SQLBUF                          4096            /* SQL query buffer size */
 
 
 /* compression settings */
@@ -417,47 +538,17 @@ typedef char str64k[1024*64];
 #define SHOULD_BE_COMPRESSED(len, type) (len > COMPRESS_TRESHOLD && (type==RES_HTML || type==RES_TEXT || type==RES_JSON || type==RES_CSS || type==RES_JS || type==RES_SVG || type==RES_EXE || type==RES_BMP))
 
 
-/* UTF-8 */
-
-#define CHAR_POUND                      "&#163;"
-#define CHAR_COPYRIGHT                  "&#169;"
-#define CHAR_N_ACUTE                    "&#324;"
-#define CHAR_DOWN_ARROWHEAD1            "&#709;"
-#define CHAR_LONG_DASH                  "&#8212;"
-#define CHAR_EURO                       "&#8364;"
-#define CHAR_UP                         "&#8593;"
-#define CHAR_DOWN                       "&#8595;"
-#define CHAR_MINUS                      "&#8722;"
-#define CHAR_VEL                        "&#8744;"
-#define CHAR_VERTICAL_ELLIPSIS          "&#8942;"
-#define CHAR_COUNTERSINK                "&#9013;"
-#define CHAR_DOUBLE_TRIANGLE_U          "&#9195;"
-#define CHAR_DOUBLE_TRIANGLE_D          "&#9196;"
-#define CHAR_DOWN_TRIANGLE_B            "&#9660;"
-#define CHAR_DOWN_TRIANGLE_W            "&#9661;"
-#define CHAR_CLOSE                      "&#10005;"
-#define CHAR_HEAVY_PLUS                 "&#10133;"
-#define CHAR_HEAVY_MINUS                "&#10134;"
-#define CHAR_DOWN_ARROWHEAD2            "&#65088;"
-#define CHAR_FULLW_PLUS                 "&#65291;"
-
-#define LOGIN_LEN                       30
-#define EMAIL_LEN                       120
-#define UNAME_LEN                       120
-#define PHONE_LEN                       30
-#define ABOUT_LEN                       250
-
-#define VIEW_DEFAULT                    '0'
-#define VIEW_DESKTOP                    '1'
-#define VIEW_MOBILE                     '2'
-
 #ifdef APP_SESID_LEN
 #define SESID_LEN                       APP_SESID_LEN
 #else
-#define SESID_LEN                       15
+#define SESID_LEN                       15      /* ~ 89 bits of entropy */
 #endif
 
-#define LANG_LEN                        7
+#ifndef CSRFT_LEN
+#define CSRFT_LEN                       7
+#endif
+
+#define LANG_LEN                        5
 
 
 /* response caching */
@@ -483,6 +574,7 @@ typedef char str64k[1024*64];
 #define AUTH_LEVEL_MODERATOR            40
 #define AUTH_LEVEL_ADMIN                50
 #define AUTH_LEVEL_ROOT                 100
+#define AUTH_LEVEL_NOBODY               125     /* for resources' whitelisting */
 
 #ifndef DEF_RES_AUTH_LEVEL
 #define DEF_RES_AUTH_LEVEL              AUTH_LEVEL_NONE     /* default resource authorization level */
@@ -505,6 +597,7 @@ typedef char str64k[1024*64];
 #define ERR_REMOTE_CALL                 11
 #define ERR_REMOTE_CALL_STATUS          12
 #define ERR_REMOTE_CALL_DATA            13
+#define ERR_CSRFT                       14
 /* ------------------------------------- */
 #define ERR_MAX_ENGINE_ERROR            99
 /* ------------------------------------- */
@@ -530,6 +623,11 @@ typedef char str64k[1024*64];
 #define STATIC_SOURCE_INTERNAL          0
 #define STATIC_SOURCE_RES               1
 #define STATIC_SOURCE_RESMIN            2
+#define STATIC_SOURCE_SNIPPET           3
+
+#ifndef MAX_SNIPPETS
+#define MAX_SNIPPETS                    1000
+#endif
 
 
 /* asynchronous calls */
@@ -598,6 +696,7 @@ typedef char str64k[1024*64];
 /* incoming */
 
 #define CONTENT_TYPE_URLENCODED         'U'
+#define CONTENT_TYPE_JSON               'J'
 #define CONTENT_TYPE_MULTIPART          'M'
 #define CONTENT_TYPE_OCTET_STREAM       'O'
 
@@ -622,16 +721,16 @@ typedef char str64k[1024*64];
 #define RES_ZIP                         'Z'
 
 
-#define REQ0                            conn[ci].resource
-#define REQ1                            conn[ci].req1
-#define REQ2                            conn[ci].req2
-#define REQ3                            conn[ci].req3
-#define URI(uri_)                       (0==strcmp(conn[ci].uri, uri_))
+#define URI(uri)                        eng_is_uri(ci, uri)
 #define REQ(res)                        (0==strcmp(conn[ci].resource, res))
-#define ID(id)                          (0==strcmp(conn[ci].id, id))
+#define REQ0(res)                       (0==strcmp(conn[ci].resource, res))
+#define REQ1(res)                       (0==strcmp(conn[ci].req1, res))
+#define REQ2(res)                       (0==strcmp(conn[ci].req2, res))
+#define REQ3(res)                       (0==strcmp(conn[ci].req3, res))
+#define ID                              conn[ci].id
 #define US                              uses[conn[ci].usi]
 #define AUS                             auses[conn[ci].usi]
-#define HOST(str)                       eng_host(ci, str)
+#define HOST(str)                       (0==strcmp(conn[ci].host_normalized, upper(str)))
 #define REQ_GET_HEADER(header)          eng_get_header(ci, header)
 
 #define REQ_DATA                        conn[ci].in_data
@@ -651,32 +750,62 @@ typedef char str64k[1024*64];
 
 #define REDIRECT_TO_LANDING             sprintf(conn[ci].location, "%s://%s", PROTOCOL, conn[ci].host)
 
-#define OUT_MSG_DESCRIPTION(code)       lib_send_msg_description(ci, code)
-#define OUT_HTML_HEADER                 lib_out_html_header(ci)
-#define OUT_HTML_FOOTER                 lib_out_html_footer(ci)
 #define APPEND_CSS(name, first)         lib_append_css(ci, name, first)
 #define APPEND_SCRIPT(name, first)      lib_append_script(ci, name, first)
 
-#define MAX_URI_VAL_LEN                 255             /* max value length received in URI -- sufficient for 99% cases */
-#define MAX_LONG_URI_VAL_LEN            65535           /* max long value length received in URI -- 64 kB - 1 B */
 
-#define QSBUF                           MAX_URI_VAL_LEN+1
-#define QS_BUF                          QSBUF
+/* query string values' retrieval */
 
-#define QS_HTML_ESCAPE(param, val)      get_qs_param_html_esc(ci, param, val)
-#define QS_SQL_ESCAPE(param, val)       get_qs_param_sql_esc(ci, param, val)
-#define QS_DONT_ESCAPE(param, val)      get_qs_param(ci, param, val)
-#define QS_RAW(param, val)              get_qs_param_raw(ci, param, val, MAX_URI_VAL_LEN)
+#define ESC_NONE                        (char)0
+#define ESC_SQL                         (char)1
+#define ESC_HTML                        (char)2
+
+#define QS_DONT_ESCAPE(param, val)      get_qs_param(ci, param, val, MAX_URI_VAL_LEN, ESC_NONE)
+#define QS_SQL_ESCAPE(param, val)       get_qs_param(ci, param, val, MAX_URI_VAL_LEN, ESC_SQL)
+#define QS_HTML_ESCAPE(param, val)      get_qs_param(ci, param, val, MAX_URI_VAL_LEN, ESC_HTML)
+
+#define QS_TEXT_DONT_ESCAPE(param, val) get_qs_param(ci, param, val, 65535, ESC_NONE)
+#define QS_TEXT_SQL_ESCAPE(param, val)  get_qs_param(ci, param, val, 65535, ESC_SQL)
+#define QS_TEXT_HTML_ESCAPE(param, val) get_qs_param(ci, param, val, 65535, ESC_HTML)
 
 #ifdef QS_DEF_HTML_ESCAPE
-#define QS(param, val)                  QS_HTML_ESCAPE(param, val)
+#define QS(param, val)                  get_qs_param(ci, param, val, MAX_URI_VAL_LEN, ESC_HTML)
+#define QS1K(param, val)                get_qs_param(ci, param, val, 1023, ESC_HTML)
+#define QS2K(param, val)                get_qs_param(ci, param, val, 2047, ESC_HTML)
+#define QS4K(param, val)                get_qs_param(ci, param, val, 4095, ESC_HTML)
+#define QS8K(param, val)                get_qs_param(ci, param, val, 8191, ESC_HTML)
+#define QS16K(param, val)               get_qs_param(ci, param, val, 16383, ESC_HTML)
+#define QS32K(param, val)               get_qs_param(ci, param, val, 32767, ESC_HTML)
+#define QS64K(param, val)               get_qs_param(ci, param, val, 65535, ESC_HTML)
+#define QS_TEXT(param, val)             get_qs_param(ci, param, val, 65535, ESC_HTML)
 #endif
 #ifdef QS_DEF_SQL_ESCAPE
-#define QS(param, val)                  QS_SQL_ESCAPE(param, val)
+#define QS(param, val)                  get_qs_param(ci, param, val, MAX_URI_VAL_LEN, ESC_SQL)
+#define QS1K(param, val)                get_qs_param(ci, param, val, 1023, ESC_SQL)
+#define QS2K(param, val)                get_qs_param(ci, param, val, 2047, ESC_SQL)
+#define QS4K(param, val)                get_qs_param(ci, param, val, 4095, ESC_SQL)
+#define QS8K(param, val)                get_qs_param(ci, param, val, 8191, ESC_SQL)
+#define QS16K(param, val)               get_qs_param(ci, param, val, 16383, ESC_SQL)
+#define QS32K(param, val)               get_qs_param(ci, param, val, 32767, ESC_SQL)
+#define QS64K(param, val)               get_qs_param(ci, param, val, 65535, ESC_SQL)
+#define QS_TEXT(param, val)             get_qs_param(ci, param, val, 65535, ESC_SQL)
 #endif
 #ifdef QS_DEF_DONT_ESCAPE
-#define QS(param, val)                  QS_DONT_ESCAPE(param, val)
+#define QS(param, val)                  get_qs_param(ci, param, val, MAX_URI_VAL_LEN, ESC_NONE)
+#define QS1K(param, val)                get_qs_param(ci, param, val, 1023, ESC_NONE)
+#define QS2K(param, val)                get_qs_param(ci, param, val, 2047, ESC_NONE)
+#define QS4K(param, val)                get_qs_param(ci, param, val, 4095, ESC_NONE)
+#define QS8K(param, val)                get_qs_param(ci, param, val, 8191, ESC_NONE)
+#define QS16K(param, val)               get_qs_param(ci, param, val, 16383, ESC_NONE)
+#define QS32K(param, val)               get_qs_param(ci, param, val, 32767, ESC_NONE)
+#define QS64K(param, val)               get_qs_param(ci, param, val, 65535, ESC_NONE)
+#define QS_TEXT(param, val)             get_qs_param(ci, param, val, 65535, ESC_NONE)
 #endif
+
+#define QSI(param, val)                 lib_qsi(ci, param, val)
+#define QSF(param, val)                 lib_qsf(ci, param, val)
+#define QSD(param, val)                 lib_qsd(ci, param, val)
+
 
 #define SVC_NAME_LEN                    63      /* async service name length */
 
@@ -712,6 +841,7 @@ typedef struct {
 /* user session */
 
 typedef struct {
+    /* id */
     char    sesid[SESID_LEN+1];
     /* connection data */
     char    ip[INET_ADDRSTRLEN];
@@ -720,18 +850,18 @@ typedef struct {
     char    lang[LANG_LEN+1];
     bool    logged;
     /* users table record */
-    long    uid;
+    int     uid;
     char    login[LOGIN_LEN+1];
     char    email[EMAIL_LEN+1];
     char    name[UNAME_LEN+1];
     char    phone[PHONE_LEN+1];
+    char    tz[6];
     char    about[ABOUT_LEN+1];
-    char    login_tmp[LOGIN_LEN+1];     /* while My Profile isn't saved */
-    char    email_tmp[EMAIL_LEN+1];
-    char    name_tmp[UNAME_LEN+1];
-    char    phone_tmp[PHONE_LEN+1];
-    char    about_tmp[ABOUT_LEN+1];
-    short   auth_level;
+    int     group_id;
+    char    auth_level;
+    /* CSRF token */
+    char    csrft[CSRFT_LEN+1];
+    /* internal */
     time_t  last_activity;
 } usession_t;
 
@@ -744,6 +874,13 @@ typedef struct {
 
 #define LOGGED                          US.logged
 #define UID                             US.uid
+
+
+#define CSRFT_REFRESH                   silgy_random(US.csrft, CSRFT_LEN)
+#define CSRFT_OUT_INPUT                 OUT("<input type=\"hidden\" name=\"csrft\" value=\"%s\">", US.csrft)
+#define OUT_CSRFT                       CSRFT_OUT_INPUT
+#define CSRFT_OK                        lib_csrft_ok(ci)
+
 
 
 /* counters */
@@ -772,24 +909,36 @@ typedef struct {
     int      ci;
     char     service[SVC_NAME_LEN+1];
     /* pass some request details over */
+    bool     secure;
     char     ip[INET_ADDRSTRLEN];
     char     method[MAX_METHOD_LEN+1];
     bool     post;
     char     payload_location;
     char     uri[MAX_URI_LEN+1];
     char     resource[MAX_RESOURCE_LEN+1];
+    char     id[MAX_RESOURCE_LEN+1];
     char     uagent[MAX_VALUE_LEN+1];
     bool     mobile;
     char     referer[MAX_VALUE_LEN+1];
     unsigned clen;
     char     host[MAX_VALUE_LEN+1];
-    char     website[256];
+    char     website[WEBSITE_LEN+1];
     char     lang[LANG_LEN+1];
     char     in_ctype;
     char     boundary[MAX_VALUE_LEN+1];
     char     response;
     int      status;
+    char     cust_headers[CUST_HDR_LEN+1];
     char     ctype;
+    char     ctypestr[CONTENT_TYPE_LEN+1];
+    char     cdisp[CONTENT_DISP_LEN+1];
+    char     cookie_out_a[SESID_LEN+1];
+    char     cookie_out_a_exp[32];
+    char     cookie_out_l[SESID_LEN+1];
+    char     cookie_out_l_exp[32];
+    char     location[MAX_URI_LEN+1];
+    bool     dont_cache;
+    bool     keep_content;
     usession_t uses;
 #ifndef ASYNC_EXCLUDE_AUSES
     ausession_t auses;
@@ -797,17 +946,13 @@ typedef struct {
     counters_t cnts_today;
     counters_t cnts_yesterday;
     counters_t cnts_day_before;
-    unsigned days_up;
+    int      days_up;
     int      open_conn;
     int      open_conn_hwm;
     int      sessions;
     int      sessions_hwm;
     char     last_modified[32];
     int      blacklist_cnt;
-    char     cookie_out_a[SESID_LEN+1];
-    char     cookie_out_a_exp[32];
-    char     cookie_out_l[SESID_LEN+1];
-    char     cookie_out_l_exp[32];
 } async_req_hdr_t;
 
 typedef struct {
@@ -831,9 +976,10 @@ typedef struct {
 typedef struct {
     int      err_code;
     int      status;
+    char     cust_headers[CUST_HDR_LEN+1];
     char     ctype;
-    char     ctypestr[256];
-    char     cdisp[256];
+    char     ctypestr[CONTENT_TYPE_LEN+1];
+    char     cdisp[CONTENT_DISP_LEN+1];
     char     cookie_out_a[SESID_LEN+1];
     char     cookie_out_a_exp[32];
     char     cookie_out_l[SESID_LEN+1];
@@ -848,7 +994,7 @@ typedef struct {
 #ifndef ASYNC_EXCLUDE_AUSES
     ausession_t auses;
 #endif
-    long     invalidate_uid;
+    int      invalidate_uid;
     int      invalidate_ci;
 } async_res_hdr_t;
 
@@ -878,11 +1024,13 @@ typedef struct {
 
 #ifdef SILGY_SVC
 typedef struct {                            /* request details for silgy_svc */
+    bool     secure;
     char     ip[INET_ADDRSTRLEN];
     char     method[MAX_METHOD_LEN+1];
     bool     post;
     char     uri[MAX_URI_LEN+1];
     char     resource[MAX_RESOURCE_LEN+1];
+    char     id[MAX_RESOURCE_LEN+1];
     char     uagent[MAX_VALUE_LEN+1];
     bool     mobile;
     char     referer[MAX_VALUE_LEN+1];
@@ -890,15 +1038,16 @@ typedef struct {                            /* request details for silgy_svc */
     char     *in_data;
     unsigned in_data_allocated;
     char     host[MAX_VALUE_LEN+1];
-    char     website[256];
+    char     website[WEBSITE_LEN+1];
     char     lang[LANG_LEN+1];
     char     in_ctype;
     char     boundary[MAX_VALUE_LEN+1];
     int      usi;
     int      status;
+    char     cust_headers[CUST_HDR_LEN+1];
     char     ctype;
-    char     ctypestr[256];
-    char     cdisp[256];
+    char     ctypestr[CONTENT_TYPE_LEN+1];
+    char     cdisp[CONTENT_DISP_LEN+1];
     char     cookie_out_a[SESID_LEN+1];
     char     cookie_out_a_exp[32];
     char     cookie_out_l[SESID_LEN+1];
@@ -930,6 +1079,7 @@ typedef struct {
     char     req1[MAX_RESOURCE_LEN+1];       /* from URI -- level 1 */
     char     req2[MAX_RESOURCE_LEN+1];       /* from URI -- level 2 */
     char     req3[MAX_RESOURCE_LEN+1];       /* from URI -- level 3 */
+    char     id[MAX_RESOURCE_LEN+1];         /* from URI -- last part */
     char     proto[16];                      /* HTTP request version */
     char     uagent[MAX_VALUE_LEN+1];        /* user agent string */
     bool     mobile;
@@ -940,7 +1090,8 @@ typedef struct {
     char     cookie_in_a[SESID_LEN+1];       /* anonymous */
     char     cookie_in_l[SESID_LEN+1];       /* logged in */
     char     host[MAX_VALUE_LEN+1];
-    char     website[256];
+    char     host_normalized[MAX_VALUE_LEN+1];
+    char     website[WEBSITE_LEN+1];
     char     lang[LANG_LEN+1];
     time_t   if_mod_since;
     char     in_ctypestr[MAX_VALUE_LEN+1];   /* content type as an original string */
@@ -948,6 +1099,7 @@ typedef struct {
     char     boundary[MAX_VALUE_LEN+1];      /* for POST multipart/form-data type */
     char     authorization[MAX_VALUE_LEN+1]; /* Authorization */
     bool     accept_deflate;
+    int      host_id;
     /* what goes out */
     unsigned out_hlen;                       /* outgoing header length */
     unsigned out_len;                        /* outgoing length (all) */
@@ -960,10 +1112,11 @@ typedef struct {
     unsigned out_data_allocated;             /* number of allocated bytes */
     char     *out_data;                      /* pointer to the data to send */
     int      status;                         /* HTTP status */
+    char     cust_headers[CUST_HDR_LEN+1];
     unsigned data_sent;                      /* how many content bytes have been sent */
     char     ctype;                          /* content type */
-    char     ctypestr[256];                  /* user (custom) content type */
-    char     cdisp[256];                     /* content disposition */
+    char     ctypestr[CONTENT_TYPE_LEN+1];   /* user (custom) content type */
+    char     cdisp[CONTENT_DISP_LEN+1];      /* content disposition */
     time_t   modified;
     char     cookie_out_a[SESID_LEN+1];
     char     cookie_out_a_exp[32];           /* cookie expires */
@@ -1004,6 +1157,7 @@ typedef struct {
 /* static resources */
 
 typedef struct {
+    char     host[MAX_VALUE_LEN+1];
     char     name[STATIC_PATH_LEN];
     char     type;
     char     *data;
@@ -1039,16 +1193,12 @@ typedef struct {
 } counters_fmt_t;
 
 
-/* messages */
 
-#define MAX_MSG_LEN     255
-#define MAX_MESSAGES    1000
+#include <silgy_lib.h>
 
-typedef struct {
-    int  code;
-    char lang[8];
-    char message[MAX_MSG_LEN+1];
-} messages_t;
+#ifdef USERS
+#include <silgy_usr.h>
+#endif
 
 
 
@@ -1058,105 +1208,119 @@ extern "C" {
 
 /* read from the config file */
 
-extern int      G_logLevel;
-extern int      G_logToStdout;
-extern int      G_logCombined;
-extern int      G_httpPort;
-extern int      G_httpsPort;
-extern char     G_cipherList[1024];
-extern char     G_certFile[256];
-extern char     G_certChainFile[256];
-extern char     G_keyFile[256];
-extern char     G_dbHost[128];
-extern int      G_dbPort;
-extern char     G_dbName[128];
-extern char     G_dbUser[128];
-extern char     G_dbPassword[128];
-extern int      G_usersRequireAccountActivation;
-extern char     G_blockedIPList[256];
-extern char     G_whiteList[256];
-extern int      G_ASYNCId;
-extern int      G_ASYNCDefTimeout;
-extern int      G_RESTTimeout;
-extern int      G_test;
+extern int          G_logLevel;
+extern int          G_logToStdout;
+extern int          G_logCombined;
+extern int          G_httpPort;
+extern int          G_httpsPort;
+extern char         G_cipherList[1024];
+extern char         G_certFile[256];
+extern char         G_certChainFile[256];
+extern char         G_keyFile[256];
+extern char         G_dbHost[128];
+extern int          G_dbPort;
+extern char         G_dbName[128];
+extern char         G_dbUser[128];
+extern char         G_dbPassword[128];
+extern int          G_usersRequireAccountActivation;
+extern char         G_blockedIPList[256];
+extern char         G_whiteList[256];
+extern int          G_ASYNCId;
+extern int          G_ASYNCDefTimeout;
+extern int          G_RESTTimeout;
+extern int          G_test;
+
 /* end of config params */
-extern int      G_pid;                      /* pid */
-extern char     G_appdir[256];              /* application root dir */
-extern unsigned G_days_up;                  /* web server's days up */
-extern conn_t   conn[MAX_CONNECTIONS+1];    /* HTTP connections & requests -- by far the most important structure around */
-extern int      G_open_conn;                /* number of open connections */
-extern int      G_open_conn_hwm;            /* highest number of open connections (high water mark) */
-extern char     G_tmp[TMP_BUFSIZE];         /* temporary string buffer */
-extern usession_t uses[MAX_SESSIONS+1];     /* engine user sessions -- they start from 1 */
-extern ausession_t auses[MAX_SESSIONS+1];   /* app user sessions, using the same index (usi) */
-extern int      G_sessions;                 /* number of active user sessions */
-extern int      G_sessions_hwm;             /* highest number of active user sessions (high water mark) */
-extern time_t   G_now;                      /* current time */
-extern struct tm *G_ptm;                    /* human readable current time */
-extern char     G_last_modified[32];        /* response header field with server's start time */
-extern messages_t G_messages[MAX_MESSAGES];
-extern int      G_next_message;
+
+extern int          G_pid;                      /* pid */
+extern char         G_appdir[256];              /* application root dir */
+extern int          G_days_up;                  /* web server's days up */
+extern conn_t       conn[MAX_CONNECTIONS+1];    /* HTTP connections & requests -- by far the most important structure around */
+extern int          G_open_conn;                /* number of open connections */
+extern int          G_open_conn_hwm;            /* highest number of open connections (high water mark) */
+extern char         G_tmp[TMP_BUFSIZE];         /* temporary string buffer */
+extern usession_t   uses[MAX_SESSIONS+1];       /* engine user sessions -- they start from 1 */
+extern ausession_t  auses[MAX_SESSIONS+1];      /* app user sessions, using the same index (usi) */
+extern int          G_sessions;                 /* number of active user sessions */
+extern int          G_sessions_hwm;             /* highest number of active user sessions (high water mark) */
+extern time_t       G_now;                      /* current time */
+extern struct tm    *G_ptm;                     /* human readable current time */
+extern char         G_last_modified[32];        /* response header field with server's start time */
+extern bool         G_initialized;
+
+/* messages */
+extern message_t    G_messages[MAX_MESSAGES];
+extern int          G_next_msg;
+extern lang_t       G_msg_lang[MAX_LANGUAGES];
+extern int          G_next_msg_lang;
+
+/* strings */
+extern string_t     G_strings[MAX_STRINGS];
+extern int          G_next_str;
+extern lang_t       G_str_lang[MAX_LANGUAGES];
+extern int          G_next_str_lang;
+
+/* snippets */
+extern stat_res_t   G_snippets[MAX_SNIPPETS];
+extern int          G_snippets_cnt;
 
 #ifdef HTTPS
-extern bool     G_ssl_lib_initialized;
+extern bool         G_ssl_lib_initialized;
 #endif
 
 #ifdef DBMYSQL
-extern MYSQL    *G_dbconn;                  /* database connection */
+extern MYSQL        *G_dbconn;                  /* database connection */
 #endif
 
 /* asynchorous processing */
 #ifndef _WIN32
-extern char     G_req_queue_name[256];
-extern char     G_res_queue_name[256];
-extern mqd_t    G_queue_req;                /* request queue */
-extern mqd_t    G_queue_res;                /* response queue */
+extern char         G_req_queue_name[256];
+extern char         G_res_queue_name[256];
+extern mqd_t        G_queue_req;                /* request queue */
+extern mqd_t        G_queue_res;                /* response queue */
 #endif  /* _WIN32 */
-extern int      G_async_req_data_size;      /* how many bytes are left for data */
-extern int      G_async_res_data_size;      /* how many bytes are left for data */
+extern int          G_async_req_data_size;      /* how many bytes are left for data */
+extern int          G_async_res_data_size;      /* how many bytes are left for data */
 
-extern char     G_dt[20];                   /* datetime for database or log (YYYY-MM-DD hh:mm:ss) */
-extern bool     G_index_present;            /* index.html present in res? */
+extern char         G_dt[20];                   /* datetime for database or log (YYYY-MM-DD hh:mm:ss) */
+extern bool         G_index_present;            /* index.html present in res? */
 
 #ifdef SILGY_SVC
-extern async_req_t req;
-extern async_res_t res;
+extern async_req_t  req;
+extern async_res_t  res;
 #ifdef OUTCHECKREALLOC
-extern char     *out_data;
+extern char         *out_data;
 #endif
-extern char     *p_content;
-extern char     G_service[SVC_NAME_LEN+1];
-extern int      G_error_code;
-extern int      ci;
+extern char         *p_content;
+extern char         G_service[SVC_NAME_LEN+1];
+extern int          G_error_code;
+//extern int          ci;
 #endif  /* SILGY_SVC */
 
-extern char     G_blacklist[MAX_BLACKLIST+1][INET_ADDRSTRLEN];
-extern int      G_blacklist_cnt;            /* G_blacklist length */
+extern char         G_blacklist[MAX_BLACKLIST+1][INET_ADDRSTRLEN];
+extern int          G_blacklist_cnt;            /* G_blacklist length */
 
-extern char     G_whitelist[MAX_WHITELIST+1][INET_ADDRSTRLEN];
-extern int      G_whitelist_cnt;            /* G_whitelist length */
+extern char         G_whitelist[MAX_WHITELIST+1][INET_ADDRSTRLEN];
+extern int          G_whitelist_cnt;            /* G_whitelist length */
 /* counters */
-extern counters_t G_cnts_today;             /* today's counters */
-extern counters_t G_cnts_yesterday;         /* yesterday's counters */
-extern counters_t G_cnts_day_before;        /* day before's counters */
+extern counters_t   G_cnts_today;               /* today's counters */
+extern counters_t   G_cnts_yesterday;           /* yesterday's counters */
+extern counters_t   G_cnts_day_before;          /* day before's counters */
 /* REST */
-extern int      G_rest_status;              /* last REST call response status */
-extern unsigned G_rest_req;                 /* REST calls counter */
-extern double   G_rest_elapsed;             /* REST calls elapsed for calculating average */
-extern double   G_rest_average;             /* REST calls average elapsed */
-extern char     G_rest_content_type[MAX_VALUE_LEN+1];
-extern long     G_new_user_id;
+extern int          G_rest_status;              /* last REST call response status */
+extern unsigned     G_rest_req;                 /* REST calls counter */
+extern double       G_rest_elapsed;             /* REST calls elapsed for calculating average */
+extern double       G_rest_average;             /* REST calls average elapsed */
+extern char         G_rest_content_type[MAX_VALUE_LEN+1];
+extern int          G_rest_res_len;
+extern int          G_new_user_id;
+extern int          G_qs_len;
+
 
 #ifdef __cplusplus
 }   /* extern "C" */
 #endif
 
-
-#include <silgy_lib.h>
-
-#ifdef USERS
-#include <silgy_usr.h>
-#endif
 
 
 
@@ -1168,13 +1332,14 @@ extern "C" {
 
     /* public engine functions */
 
-    void silgy_set_auth_level(const char *resource, short level);
+    void silgy_set_auth_level(const char *path, char level);
     int  eng_uses_start(int ci, const char *sesid);
-    void eng_uses_downgrade_by_uid(long uid, int ci);
+    void eng_uses_downgrade_by_uid(int uid, int ci);
     void eng_async_req(int ci, const char *service, const char *data, char response, int timeout, int size);
     void silgy_add_to_static_res(const char *name, const char *src);
     void eng_block_ip(const char *value, bool autoblocked);
-    bool eng_host(int ci, const char *host);
+    bool eng_is_uri(int ci, const char *uri);
+    bool silgy_set_host_res(const char *host, const char *res, const char *resmin);
     void eng_out_check(int ci, const char *str);
     void eng_out_check_realloc(int ci, const char *str);
     void eng_out_check_realloc_bin(int ci, const char *data, int len);
@@ -1188,9 +1353,9 @@ extern "C" {
     void svc_out_check_realloc(const char *str);
     void svc_out_check_realloc_bin(const char *data, int len);
     bool silgy_svc_init(void);
-    void silgy_svc_main(void);
+    void silgy_svc_main(int ci);
     void silgy_svc_done(void);
-#else /* not SILGY_SVC */
+#else   /* not SILGY_SVC */
     bool silgy_app_init(int argc, char *argv[]);
     void silgy_app_done(void);
     void silgy_app_main(int ci);

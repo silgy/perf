@@ -11,6 +11,7 @@
 
 #ifdef ICONV
 #include <iconv.h>
+#include <locale.h>
 #endif
 
 
@@ -31,8 +32,21 @@ time_t      G_now=0;                    /* current time (GMT) */
 struct tm   *G_ptm={0};                 /* human readable current time */
 char        G_dt[20]="";                /* datetime for database or log (YYYY-MM-DD hh:mm:ss) */
 char        G_tmp[TMP_BUFSIZE];         /* temporary string buffer */
-messages_t  G_messages[MAX_MESSAGES]={0};
-int         G_next_message=0;
+
+/* messages */
+message_t   G_messages[MAX_MESSAGES]={0};
+int         G_next_msg=0;
+lang_t      G_msg_lang[MAX_LANGUAGES]={0};
+int         G_next_msg_lang=0;
+
+/* strings */
+string_t    G_strings[MAX_STRINGS]={0};
+int         G_next_str=0;
+lang_t      G_str_lang[MAX_LANGUAGES]={0};
+int         G_next_str_lang=0;
+
+stat_res_t  G_snippets[MAX_SNIPPETS]={0};
+int         G_snippets_cnt=0;
 
 #ifdef HTTPS
 bool        G_ssl_lib_initialized=0;
@@ -43,6 +57,8 @@ double      G_rest_elapsed=0;           /* REST calls elapsed for calculating av
 double      G_rest_average=0;           /* REST calls average elapsed */
 int         G_rest_status;              /* last REST call response status */
 char        G_rest_content_type[MAX_VALUE_LEN+1];
+int         G_rest_res_len=0;
+int         G_qs_len=0;
 
 
 /* locals */
@@ -53,6 +69,8 @@ static FILE *M_log_fd=NULL;             /* log file handle */
 static char M_df=0;                     /* date format */
 static char M_tsep=' ';                 /* thousand separator */
 static char M_dsep='.';                 /* decimal separator */
+
+static char *M_md_dest;
 
 #ifndef _WIN32
 static int  M_shmid[MAX_SHM_SEGMENTS]={0}; /* SHM id-s */
@@ -80,7 +98,7 @@ static char M_random_initialized=0;
 
 
 static void load_err_messages(void);
-static void seed_rand(void);
+static void load_strings(void);
 static void minify_1(char *dest, const char *src, int len);
 static int  minify_2(char *dest, const char *src);
 static void get_byteorder32(void);
@@ -116,15 +134,17 @@ void silgy_lib_init()
 
     load_err_messages();
 
-#ifndef _WIN32
+#ifndef SILGY_WATCHER
+    /* load strings */
+    load_strings();
 
-    /* SHM segments array */
+    for ( i=0; i<MAX_SNIPPETS; ++i )
+        strcpy(G_snippets[i].name, "-");
+#endif
 
-//    for ( i=0; i<MAX_SHM_SEGMENTS; ++i )
-//        M_shmid[i] = NULL;
-
-#endif  /* _WIN32 */
-
+#ifdef ICONV
+    setlocale(LC_ALL, "");
+#endif
 }
 
 
@@ -149,10 +169,297 @@ void silgy_lib_done()
 
 
 /* --------------------------------------------------------------------------
+   Copy 0-terminated UTF-8 string safely
+   dst_len is in bytes and excludes terminating 0
+   dst_len must be > 0
+-------------------------------------------------------------------------- */
+void silgy_safe_copy(char *dst, const char *src, size_t dst_len)
+{
+#ifdef DUMP
+    DBG("silgy_safe_copy [%s], dst_len = %d", src, dst_len);
+#endif
+    strncpy(dst, src, dst_len+1);
+
+    if ( dst[dst_len] == EOS )
+    {
+#ifdef DUMP
+        DBG("not truncated");
+#endif
+        return;   /* not truncated */
+    }
+
+    /* ------------------------- */
+    /* string has been truncated */
+
+    if ( !UTF8_ANY(dst[dst_len]) )
+    {
+        dst[dst_len] = EOS;
+#ifdef DUMP
+        DBG("truncated string won't break the UTF-8 sequence");
+#endif
+        return;
+    }
+
+    /* ------------------------------- */
+    /* string ends with UTF-8 sequence */
+
+    /* cut until beginning of the sequence found */
+
+    while ( !UTF8_START(dst[dst_len]) )
+    {
+#ifdef DUMP
+        DBG("UTF-8 sequence byte (%x)", dst[dst_len]);
+#endif
+        if ( dst_len == 0 )
+        {
+            dst[0] = EOS;
+            return;
+        }
+
+        dst_len--;
+    }
+
+    dst[dst_len] = EOS;
+}
+
+
+
+
+/* --------------------------------------------------------- */
+/* MD parsing ---------------------------------------------- */
+
+#define MD_TAG_NONE '0'
+#define MD_TAG_P    'p'
+#define MD_TAG_H1   '1'
+#define MD_TAG_H2   '2'
+#define MD_TAG_H3   '3'
+
+
+/* --------------------------------------------------------------------------
+   Detect MD block tag
+   src is at the beginning of the new line
+-------------------------------------------------------------------------- */
+static int detect_tag(const char *src, char *tag)
+{
+    int skip=0;
+
+    while ( *src && (*src==' ' || *src=='\t') )
+    {
+        ++src;
+        ++skip;
+    }
+
+    if ( *src=='#' )
+    {
+        if ( *(src+1)=='#' )
+        {
+            if ( *(src+2)=='#' )
+            {
+                *tag = MD_TAG_H3;
+                skip += 4;
+            }
+            else
+            {
+                *tag = MD_TAG_H2;
+                skip += 3;
+            }
+        }
+        else
+        {
+            *tag = MD_TAG_H1;
+            skip += 2;
+        }
+    }
+    else if ( *src )
+    {
+        *tag = MD_TAG_P;
+    }
+    else    /* end of document */
+    {
+        *tag = MD_TAG_NONE;
+    }
+
+    return skip;
+}
+
+
+/* --------------------------------------------------------------------------
+   Open HTML tag
+-------------------------------------------------------------------------- */
+static void open_tag(char tag)
+{
+    if ( tag == MD_TAG_P )
+        M_md_dest = stpcpy(M_md_dest, "<p>");
+    else if ( tag == MD_TAG_H1 )
+        M_md_dest = stpcpy(M_md_dest, "<h1>");
+    else if ( tag == MD_TAG_H2 )
+        M_md_dest = stpcpy(M_md_dest, "<h2>");
+    else if ( tag == MD_TAG_H3 )
+        M_md_dest = stpcpy(M_md_dest, "<h3>");
+}
+
+
+/* --------------------------------------------------------------------------
+   Close HTML tag
+-------------------------------------------------------------------------- */
+static void close_tag(const char *src, char tag)
+{
+    if ( tag == MD_TAG_P && (*src==EOS || *(src+1)==EOS || *(src+1)=='\n' || *(src+1)=='\r') )
+        M_md_dest = stpcpy(M_md_dest, "</p>");
+    else if ( tag == MD_TAG_H1 )
+        M_md_dest = stpcpy(M_md_dest, "</h1>");
+    else if ( tag == MD_TAG_H2 )
+        M_md_dest = stpcpy(M_md_dest, "</h2>");
+    else if ( tag == MD_TAG_H3 )
+        M_md_dest = stpcpy(M_md_dest, "</h3>");
+}
+
+
+/* --------------------------------------------------------------------------
+   Render simplified md to HTML
+-------------------------------------------------------------------------- */
+char *silgy_render_md(char *dest, const char *src)
+{
+    int pos=0;    /* source position */
+    int skip;
+
+    M_md_dest = dest;
+
+    char tag;
+
+    skip = detect_tag(src, &tag);
+
+    if ( skip )
+    {
+        src += skip;
+        pos += skip;
+    }
+
+    open_tag(tag);
+
+    const char *prev1, *prev2;
+
+    while ( *src )
+    {
+        if ( pos > 0 )
+            prev1 = src - 1;
+
+        if ( pos > 1 )
+            prev2 = src - 2;
+
+        if ( *src=='\n' )
+        {
+            close_tag(src, tag);
+
+            /* skip to the next line */
+
+            while ( *src && (*src==' ' || *src=='\t' || *src=='\r' || *src=='\n') )
+            {
+                ++src;
+                ++pos;
+            }
+
+            skip = detect_tag(src, &tag);
+
+            if ( skip )
+            {
+                src += skip;
+                pos += skip;
+            }
+
+            open_tag(tag);
+
+            if ( pos )
+            {
+                src--;
+                pos--;
+            }
+        }
+        else if ( pos > 0 && *src=='-' && *prev1=='-' )  /* convert -- to ndash */
+        {
+            M_md_dest = stpcpy(--M_md_dest, "–");
+        }
+        else if ( *src!='\r' && *src!='\n' && *src!='#' )
+        {
+            *M_md_dest++ = *src;
+        }
+
+        ++src;
+        ++pos;
+    }
+
+    close_tag(src, tag);
+
+    *M_md_dest = EOS;
+
+    return dest;
+}
+
+
+/* --------------------------------------------------------------------------
+   Encode string for JSON
+-------------------------------------------------------------------------- */
+char *silgy_json_enc(const char *src)
+{
+static char dst[JSON_BUFSIZE];
+    int cnt=0;
+
+    while ( *src && cnt < JSON_BUFSIZE-3 )
+    {
+        if ( *src=='\t' )
+        {
+            dst[cnt++] = '\\';
+            dst[cnt++] = 't';
+        }
+        else if ( *src=='\n' )
+        {
+            dst[cnt++] = '\\';
+            dst[cnt++] = 'n';
+        }
+        else if ( *src=='\r' )
+        {
+            /* ignore */
+        }
+        else
+        {
+            dst[cnt++] = *src;
+        }
+
+        ++src;
+    }
+
+    dst[cnt] = EOS;
+
+    return dst;
+}
+
+
+/* --------------------------------------------------------------------------
+   Verify CSRF token
+-------------------------------------------------------------------------- */
+bool lib_csrft_ok(int ci)
+{
+#ifndef SILGY_WATCHER
+
+    QSVAL csrft;
+
+    if ( !QS("csrft", csrft) ) return FALSE;
+
+    if ( 0 != strcmp(csrft, US.csrft) ) return FALSE;
+
+#endif  /* SILGY_WATCHER */
+
+    return TRUE;
+}
+
+
+/* --------------------------------------------------------------------------
    Load error messages
 -------------------------------------------------------------------------- */
 static void load_err_messages()
 {
+    DBG("load_err_messages");
+
     silgy_add_message(OK,                        "EN-US", "OK");
     silgy_add_message(ERR_INT_SERVER_ERROR,      "EN-US", "Apologies, this is our fault. Please try again later.");
     silgy_add_message(ERR_SERVER_TOOBUSY,        "EN-US", "Apologies, we are experiencing very high demand right now, please try again in a few minutes.");
@@ -161,12 +468,13 @@ static void load_err_messages()
     silgy_add_message(ERR_UNAUTHORIZED,          "EN-US", "Unauthorized");
     silgy_add_message(ERR_FORBIDDEN,             "EN-US", "Forbidden");
     silgy_add_message(ERR_FILE_TOO_BIG,          "EN-US", "File too big");
-    silgy_add_message(ERR_REDIRECTION,           "EN-US", "Redirection error");
+    silgy_add_message(ERR_REDIRECTION,           "EN-US", "Redirection required");
     silgy_add_message(ERR_ASYNC_NO_SUCH_SERVICE, "EN-US", "No such service");
     silgy_add_message(ERR_ASYNC_TIMEOUT,         "EN-US", "Asynchronous service timeout");
     silgy_add_message(ERR_REMOTE_CALL,           "EN-US", "Couldn't call the remote service");
     silgy_add_message(ERR_REMOTE_CALL_STATUS,    "EN-US", "Remote service call returned unsuccessful status");
     silgy_add_message(ERR_REMOTE_CALL_DATA,      "EN-US", "Data returned from the remote service is invalid");
+    silgy_add_message(ERR_CSRFT,                 "EN-US", "Your previous session has expired. Please refresh this page before trying again.");
 }
 
 
@@ -175,14 +483,14 @@ static void load_err_messages()
 -------------------------------------------------------------------------- */
 void silgy_add_message(int code, const char *lang, const char *message, ...)
 {
-    if ( G_next_message >= MAX_MESSAGES )
+    if ( G_next_msg >= MAX_MESSAGES )
     {
         ERR("MAX_MESSAGES (%d) has been reached", MAX_MESSAGES);
         return;
     }
 
     va_list plist;
-    char    buffer[MAX_MSG_LEN+1];
+    char buffer[MAX_MSG_LEN+1];
 
     /* compile message with arguments into buffer */
 
@@ -190,24 +498,97 @@ void silgy_add_message(int code, const char *lang, const char *message, ...)
     vsprintf(buffer, message, plist);
     va_end(plist);
 
-    G_messages[G_next_message].code = code;
+    G_messages[G_next_msg].code = code;
     if ( lang )
-        strcpy(G_messages[G_next_message].lang, upper(lang));
-    strcpy(G_messages[G_next_message].message, buffer);
+        strcpy(G_messages[G_next_msg].lang, upper(lang));
+    strcpy(G_messages[G_next_msg].message, buffer);
 
-    ++G_next_message;
+    ++G_next_msg;
+
+    /* in case message was added after init */
+
+    if ( G_initialized )
+        sort_messages();
 }
 
 
 /* --------------------------------------------------------------------------
-   Get error description for user
--------------------------------------------------------------------------- */
-char *silgy_message(int code)
+   Comparing function for messages
+---------------------------------------------------------------------------*/
+int compare_messages(const void *a, const void *b)
 {
+    const message_t *p1 = (message_t*)a;
+    const message_t *p2 = (message_t*)b;
+
+    int res = strcmp(p1->lang, p2->lang);
+
+    if ( res > 0 )
+        return 1;
+    else if ( res < 0 )
+        return -1;
+
+    /* same language then */
+
+    if ( p1->code < p2->code )
+        return -1;
+    else if ( p1->code > p2->code )
+        return 1;
+    else
+        return 0;
+}
+
+
+/* --------------------------------------------------------------------------
+   Sort and index messages by languages
+-------------------------------------------------------------------------- */
+void sort_messages()
+{
+    qsort(&G_messages, G_next_msg, sizeof(message_t), compare_messages);
+
     int i;
-    for ( i=0; i<G_next_message; ++i )
-        if ( G_messages[i].code == code )
-            return G_messages[i].message;
+
+    for ( i=0; i<G_next_msg; ++i )
+    {
+        if ( 0 != strcmp(G_messages[i].lang, G_msg_lang[G_next_msg_lang].lang) )
+        {
+            if ( G_next_msg_lang ) G_msg_lang[G_next_msg_lang-1].next_lang_index = i;
+
+            strcpy(G_msg_lang[G_next_msg_lang].lang, G_messages[i].lang);
+            G_msg_lang[G_next_msg_lang].first_index = i;
+            ++G_next_msg_lang;
+        }
+    }
+
+    G_msg_lang[G_next_msg_lang-1].next_lang_index = G_next_msg;
+}
+
+
+/* --------------------------------------------------------------------------
+   Get error description for user in STRINGS_LANG
+-------------------------------------------------------------------------- */
+static char *lib_get_message_fallback(int code)
+{
+    int l, m;
+
+    /* try in STRINGS_LANG */
+
+    for ( l=0; l<G_next_msg_lang; ++l )   /* jump to the right language */
+    {
+        if ( 0==strcmp(G_msg_lang[l].lang, STRINGS_LANG) )
+        {
+            for ( m=G_msg_lang[l].first_index; m<G_msg_lang[l].next_lang_index; ++m )
+                if ( G_messages[m].code == code )
+                    return G_messages[m].message;
+        }
+    }
+
+    /* try in any language */
+
+    for ( m=0; m<G_next_msg; ++m )
+        if ( G_messages[m].code == code )
+            return G_messages[m].message;
+
+    /* not found */
 
 static char unknown[128];
     sprintf(unknown, "Unknown code: %d", code);
@@ -216,21 +597,369 @@ static char unknown[128];
 
 
 /* --------------------------------------------------------------------------
-   Get error description for user
-   Pick the user agent language if possible
+   Get message category
 -------------------------------------------------------------------------- */
-char *silgy_message_lang(int ci, int code)
+static char *get_msg_cat(int code)
+{
+static char cat[64];
+
+    if ( code == OK )
+    {
+        strcpy(cat, MSG_CAT_OK);
+    }
+    else if ( code < ERR_MAX_ENGINE_ERROR )
+    {
+        strcpy(cat, MSG_CAT_ERROR);
+    }
+#ifdef USERS
+    else if ( code < ERR_MAX_USR_LOGIN_ERROR )
+    {
+        strcpy(cat, MSG_CAT_USR_LOGIN);
+    }
+    else if ( code < ERR_MAX_USR_EMAIL_ERROR )
+    {
+        strcpy(cat, MSG_CAT_USR_EMAIL);
+    }
+    else if ( code < ERR_MAX_USR_PASSWORD_ERROR )
+    {
+        strcpy(cat, MSG_CAT_USR_PASSWORD);
+    }
+    else if ( code < ERR_MAX_USR_REPEAT_PASSWORD_ERROR )
+    {
+        strcpy(cat, MSG_CAT_USR_REPEAT_PASSWORD);
+    }
+    else if ( code < ERR_MAX_USR_OLD_PASSWORD_ERROR )
+    {
+        strcpy(cat, MSG_CAT_USR_OLD_PASSWORD);
+    }
+    else if ( code < ERR_MAX_USR_ERROR )
+    {
+        strcpy(cat, MSG_CAT_ERROR);
+    }
+    else if ( code < WAR_MAX_USR_WARNING )
+    {
+        strcpy(cat, MSG_CAT_WARNING);
+    }
+    else if ( code < MSG_MAX_USR_MESSAGE )
+    {
+        strcpy(cat, MSG_CAT_MESSAGE);
+    }
+#endif  /* USERS */
+    else    /* app error */
+    {
+        strcpy(cat, MSG_CAT_ERROR);
+    }
+
+    return cat;
+}
+
+
+/* --------------------------------------------------------------------------
+   Message category test
+   Only 3 main categories are recognized:
+   error (red), warning (yellow) and message (green)
+-------------------------------------------------------------------------- */
+bool silgy_is_msg_main_cat(int code, const char *arg_cat)
+{
+    char cat[64];
+
+    strcpy(cat, get_msg_cat(code));
+
+    if ( 0==strcmp(cat, arg_cat) )
+        return TRUE;
+
+#ifdef USERS
+    if ( 0==strcmp(arg_cat, MSG_CAT_ERROR) &&
+            (0==strcmp(cat, MSG_CAT_USR_LOGIN) || 0==strcmp(cat, MSG_CAT_USR_EMAIL) || 0==strcmp(cat, MSG_CAT_USR_PASSWORD) || 0==strcmp(cat, MSG_CAT_USR_REPEAT_PASSWORD) || 0==strcmp(cat, MSG_CAT_USR_OLD_PASSWORD)) )
+        return TRUE;
+#endif
+
+    return FALSE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Get error description for user
+   Pick the user session language if possible
+   TODO: binary search
+-------------------------------------------------------------------------- */
+char *lib_get_message(int ci, int code)
 {
 #ifndef SILGY_WATCHER
 
-    int i;
-    for ( i=0; i<G_next_message; ++i )
-        if ( G_messages[i].code == code && 0==strcmp(G_messages[i].lang, conn[ci].lang) )
-            return G_messages[i].message;
+    if ( 0==strcmp(US.lang, STRINGS_LANG) )   /* no need to translate */
+        return lib_get_message_fallback(code);
+
+    if ( !US.lang[0] )   /* unknown client language */
+        return lib_get_message_fallback(code);
+
+    int l, m;
+
+    for ( l=0; l<G_next_msg_lang; ++l )   /* jump to the right language */
+    {
+        if ( 0==strcmp(G_msg_lang[l].lang, US.lang) )
+        {
+            for ( m=G_msg_lang[l].first_index; m<G_msg_lang[l].next_lang_index; ++m )
+                if ( G_messages[m].code == code )
+                    return G_messages[m].message;
+        }
+    }
+
+    /* if not found, ignore country code */
+
+    for ( l=0; l<G_next_msg_lang; ++l )
+    {
+        if ( 0==strncmp(G_msg_lang[l].lang, US.lang, 2) )
+        {
+            for ( m=G_msg_lang[l].first_index; m<G_msg_lang[l].next_lang_index; ++m )
+                if ( G_messages[m].code == code )
+                    return G_messages[m].message;
+        }
+    }
 
     /* fallback */
 
-    return silgy_message(code);
+    return lib_get_message_fallback(code);
+
+#else   /* SILGY_WATCHER */
+
+static char dummy[16];
+
+    return dummy;
+
+#endif  /* SILGY_WATCHER */
+}
+
+
+/* --------------------------------------------------------------------------
+   Parse and set strings from data
+-------------------------------------------------------------------------- */
+static void parse_and_set_strings(const char *lang, const char *data)
+{
+    DBG("parse_and_set_strings, lang [%s]", lang);
+
+    const char *p=data;
+    int i, j=0;
+    char string_orig[MAX_STR_LEN+1];
+    char string_in_lang[MAX_STR_LEN+1];
+    bool now_key=1, now_val=0, now_com=0;
+
+    if ( G_next_str_lang >= MAX_LANGUAGES )
+    {
+        ERR("MAX_LANGUAGES (%d) has been reached", MAX_LANGUAGES);
+        return;
+    }
+
+    strcpy(G_str_lang[G_next_str_lang].lang, upper(lang));
+    G_str_lang[G_next_str_lang].first_index = G_next_str;
+
+    while ( *p )
+    {
+        if ( *p=='#' )   /* comment */
+        {
+            now_key = 0;
+            now_com = 1;
+
+            if ( now_val )
+            {
+                now_val = 0;
+                string_in_lang[j] = EOS;
+                silgy_add_string(lang, string_orig, string_in_lang);
+            }
+        }
+        else if ( now_key && *p==STRINGS_SEP )   /* separator */
+        {
+            now_key = 0;
+            now_val = 1;
+            string_orig[j] = EOS;
+            j = 0;
+        }
+        else if ( *p=='\r' || *p=='\n' )
+        {
+            if ( now_val )
+            {
+                now_val = 0;
+                string_in_lang[j] = EOS;
+                silgy_add_string(lang, string_orig, string_in_lang);
+            }
+            else if ( now_com )
+            {
+                now_com = 0;
+            }
+
+            j = 0;
+
+            now_key = 1;
+        }
+        else if ( now_key && *p!='\n' )
+        {
+            string_orig[j++] = *p;
+        }
+        else if ( now_val )
+        {
+            string_in_lang[j++] = *p;
+        }
+
+        ++p;
+    }
+
+    if ( now_val )
+    {
+        string_in_lang[j] = EOS;
+        silgy_add_string(lang, string_orig, string_in_lang);
+    }
+
+    G_str_lang[G_next_str_lang].next_lang_index = G_next_str;
+    ++G_next_str_lang;
+}
+
+
+/* --------------------------------------------------------------------------
+   Load strings
+-------------------------------------------------------------------------- */
+static void load_strings()
+{
+    int     i, len;
+    char    bindir[STATIC_PATH_LEN];        /* full path to bin */
+    char    namewpath[STATIC_PATH_LEN];     /* full path including file name */
+    DIR     *dir;
+    struct dirent *dirent;
+    FILE    *fd;
+    char    *data=NULL;
+    char    lang[8];
+
+    DBG("load_strings");
+
+    if ( G_appdir[0] == EOS ) return;
+
+    sprintf(bindir, "%s/bin", G_appdir);
+
+    if ( (dir=opendir(bindir)) == NULL )
+    {
+        DBG("Couldn't open directory [%s]", bindir);
+        return;
+    }
+
+    while ( (dirent=readdir(dir)) )
+    {
+        if ( 0 != strncmp(dirent->d_name, "strings.", 8) )
+            continue;
+
+        sprintf(namewpath, "%s/%s", bindir, dirent->d_name);
+
+        DBG("namewpath [%s]", namewpath);
+
+#ifdef _WIN32   /* Windows */
+        if ( NULL == (fd=fopen(namewpath, "rb")) )
+#else
+        if ( NULL == (fd=fopen(namewpath, "r")) )
+#endif  /* _WIN32 */
+            ERR("Couldn't open %s", namewpath);
+        else
+        {
+            fseek(fd, 0, SEEK_END);     /* determine the file size */
+            len = ftell(fd);
+            rewind(fd);
+
+            if ( NULL == (data=(char*)malloc(len+1)) )
+            {
+                ERR("Couldn't allocate %d bytes for %s", len, dirent->d_name);
+                fclose(fd);
+                closedir(dir);
+                return;
+            }
+
+            fread(data, len, 1, fd);
+            fclose(fd);
+            *(data+len) = EOS;
+
+            parse_and_set_strings(get_file_ext(dirent->d_name), data);
+
+            free(data);
+            data = NULL;
+        }
+    }
+
+    closedir(dir);
+}
+
+
+/* --------------------------------------------------------------------------
+   Add string
+-------------------------------------------------------------------------- */
+void silgy_add_string(const char *lang, const char *str, const char *str_lang)
+{
+    if ( G_next_str >= MAX_STRINGS )
+    {
+        ERR("MAX_STRINGS (%d) has been reached", MAX_STRINGS);
+        return;
+    }
+
+    strcpy(G_strings[G_next_str].lang, upper(lang));
+//    strcpy(G_strings[G_next_str].string_orig, str);
+    strcpy(G_strings[G_next_str].string_upper, upper(str));
+    strcpy(G_strings[G_next_str].string_in_lang, str_lang);
+
+    ++G_next_str;
+}
+
+
+/* --------------------------------------------------------------------------
+   Get a string
+   Pick the user session language if possible
+   If not, return given string
+   TODO: binary search
+-------------------------------------------------------------------------- */
+const char *lib_get_string(int ci, const char *str)
+{
+#ifndef SILGY_WATCHER
+
+    if ( 0==strcmp(US.lang, STRINGS_LANG) )   /* no need to translate */
+        return str;
+
+    if ( !US.lang[0] )   /* unknown client language */
+        return str;
+
+    char str_upper[MAX_STR_LEN+1];
+
+    strcpy(str_upper, upper(str));
+
+    int l, s;
+
+    for ( l=0; l<G_next_str_lang; ++l )   /* jump to the right language */
+    {
+        if ( 0==strcmp(G_str_lang[l].lang, US.lang) )
+        {
+            for ( s=G_str_lang[l].first_index; s<G_str_lang[l].next_lang_index; ++s )
+                if ( 0==strcmp(G_strings[s].string_upper, str_upper) )
+                    return G_strings[s].string_in_lang;
+
+            /* language found but not this string */
+            return str;
+        }
+    }
+
+    /* if not found, ignore country code */
+
+    for ( l=0; l<G_next_str_lang; ++l )
+    {
+        if ( 0==strncmp(G_str_lang[l].lang, US.lang, 2) )
+        {
+            for ( s=G_str_lang[l].first_index; s<G_str_lang[l].next_lang_index; ++s )
+                if ( 0==strcmp(G_strings[s].string_upper, str_upper) )
+                    return G_strings[s].string_in_lang;
+        }
+    }
+
+    /* fallback */
+
+    return str;
+
+#else   /* SILGY_WATCHER */
+
+static char dummy[16];
+
+    return dummy;
 
 #endif  /* SILGY_WATCHER */
 }
@@ -243,19 +972,20 @@ char *urlencode(const char *src)
 {
 static char     dest[4096];
     int         i, j=0;
-    const char  *hex="0123456789ABCDEF";
+    const char  hex[]="0123456789ABCDEF";
 
     for ( i=0; src[i] && j<4092; ++i )
     {
-        if ( isalnum(src[i]) )
+        if ( (48 <= src[i] && src[i] <= 57) || (65 <= src[i] && src[i] <= 90) || (97 <= src[i] && src[i] <= 122)
+                || src[i]=='-' || src[i]=='_' || src[i]=='.' || src[i]=='~' )
         {
             dest[j++] = src[i];
         }
         else
         {
             dest[j++] = '%';
-            dest[j++] = hex[src[i] >> 4];
-            dest[j++] = hex[src[i] & 15];
+            dest[j++] = hex[(unsigned char)(src[i]) >> 4];
+            dest[j++] = hex[(unsigned char)(src[i]) & 15];
         }
     }
 
@@ -369,6 +1099,322 @@ void lib_update_time_globals()
     G_now = time(NULL);
     G_ptm = gmtime(&G_now);
     sprintf(G_dt, "%d-%02d-%02d %02d:%02d:%02d", G_ptm->tm_year+1900, G_ptm->tm_mon+1, G_ptm->tm_mday, G_ptm->tm_hour, G_ptm->tm_min, G_ptm->tm_sec);
+}
+
+
+/* --------------------------------------------------------------------------
+   Find first free slot in G_snippets
+-------------------------------------------------------------------------- */
+static int first_free_snippet()
+{
+    int i=0;
+
+    for ( i=0; i<MAX_SNIPPETS; ++i )
+    {
+        if ( G_snippets[i].name[0]=='-' || G_snippets[i].name[0]==EOS )
+        {
+            if ( i > G_snippets_cnt ) G_snippets_cnt = i;
+            return i;
+        }
+    }
+
+    ERR("MAX_SNIPPETS reached (%d)! You can set/increase MAX_SNIPPETS in silgy_app.h.", MAX_SNIPPETS);
+
+    return -1;   /* nothing's free, we ran out of snippets! */
+}
+
+
+/* --------------------------------------------------------------------------
+   Read snippets from disk
+-------------------------------------------------------------------------- */
+bool read_snippets(bool first_scan, const char *path)
+{
+    int     i;
+    char    resdir[STATIC_PATH_LEN];        /* full path to res */
+    char    ressubdir[STATIC_PATH_LEN];     /* full path to res/subdir */
+    char    namewpath[STATIC_PATH_LEN];     /* full path including file name */
+    char    resname[STATIC_PATH_LEN];       /* relative path including file name */
+    DIR     *dir;
+    struct dirent *dirent;
+    FILE    *fd;
+    char    *data_tmp=NULL;
+    struct stat fstat;
+    char    mod_time[32];
+
+#ifndef _WIN32
+    if ( G_appdir[0] == EOS ) return TRUE;
+#endif
+
+    if ( first_scan && !path ) DBG("");
+
+#ifdef DUMP
+    if ( first_scan )
+    {
+        if ( !path ) DBG_LINE_LONG;
+        DBG("read_snippets");
+    }
+#endif
+
+#ifdef _WIN32   /* be more forgiving */
+
+    if ( G_appdir[0] )
+    {
+        sprintf(resdir, "%s/snippets", G_appdir);
+    }
+    else    /* no SILGYDIR */
+    {
+        sprintf(resdir, "../snippets");
+    }
+
+#else   /* Linux -- don't fool around */
+
+    sprintf(resdir, "%s/snippets", G_appdir);
+
+#endif  /* _WIN32 */
+
+#ifdef DUMP
+    if ( first_scan )
+        DBG("resdir [%s]", resdir);
+#endif
+
+    if ( !path )   /* highest level */
+    {
+        strcpy(ressubdir, resdir);
+    }
+    else    /* recursive call */
+    {
+        sprintf(ressubdir, "%s/%s", resdir, path);
+    }
+
+#ifdef DUMP
+    if ( first_scan )
+        DBG("ressubdir [%s]", ressubdir);
+#endif
+
+    if ( (dir=opendir(ressubdir)) == NULL )
+    {
+        if ( first_scan )
+            DBG("Couldn't open directory [%s]", ressubdir);
+        return TRUE;    /* don't panic, just no snippets will be used */
+    }
+
+    /* ------------------------------------------------------------------- */
+    /* check removed files */
+
+    if ( !first_scan && !path )   /* on the highest level only */
+    {
+#ifdef DUMP
+//        DBG("Checking removed files...");
+#endif
+        for ( i=0; i<=G_snippets_cnt; ++i )
+        {
+            if ( G_snippets[i].name[0]==EOS ) continue;   /* already removed */
+#ifdef DUMP
+//            DBG("Checking %s...", G_snippets[i].name);
+#endif
+            char fullpath[STATIC_PATH_LEN];
+            sprintf(fullpath, "%s/%s", resdir, G_snippets[i].name);
+
+            if ( !lib_file_exists(fullpath) )
+            {
+                INF("Removing %s from snippets", G_snippets[i].name);
+
+                G_snippets[i].name[0] = EOS;
+
+                free(G_snippets[i].data);
+                G_snippets[i].data = NULL;
+                G_snippets[i].len = 0;
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------------- */
+#ifdef DUMP
+//    DBG("Reading %sfiles", first_scan?"":"new ");
+#endif
+    /* read the files into the memory */
+
+    while ( (dirent=readdir(dir)) )
+    {
+        if ( dirent->d_name[0] == '.' )   /* skip ".", ".." and hidden files */
+            continue;
+
+        /* ------------------------------------------------------------------- */
+        /* resource name */
+
+        if ( !path )
+            strcpy(resname, dirent->d_name);
+        else
+            sprintf(resname, "%s/%s", path, dirent->d_name);
+
+#ifdef DUMP
+        if ( first_scan )
+            DBG("resname [%s]", resname);
+#endif
+
+        /* ------------------------------------------------------------------- */
+        /* additional file info */
+
+        sprintf(namewpath, "%s/%s", resdir, resname);
+
+#ifdef DUMP
+        if ( first_scan )
+            DBG("namewpath [%s]", namewpath);
+#endif
+
+        if ( stat(namewpath, &fstat) != 0 )
+        {
+            ERR("stat for [%s] failed, errno = %d (%s)", namewpath, errno, strerror(errno));
+            closedir(dir);
+            return FALSE;
+        }
+
+        /* ------------------------------------------------------------------- */
+
+        if ( S_ISDIR(fstat.st_mode) )   /* directory */
+        {
+#ifdef DUMP
+            if ( first_scan )
+                DBG("Reading subdirectory [%s]...", dirent->d_name);
+#endif
+            read_snippets(first_scan, resname);
+            continue;
+        }
+        else if ( !S_ISREG(fstat.st_mode) )    /* skip if not a regular file nor directory */
+        {
+#ifdef DUMP
+            if ( first_scan )
+                DBG("[%s] is not a regular file", resname);
+#endif
+            continue;
+        }
+
+        /* ------------------------------------------------------------------- */
+        /* already read? */
+
+        bool reread = FALSE;
+
+        if ( !first_scan )
+        {
+            bool exists_not_changed = FALSE;
+
+            for ( i=0; i<=G_snippets_cnt; ++i )
+            {
+                if ( G_snippets[i].name[0]==EOS ) continue;   /* removed */
+
+                /* ------------------------------------------------------------------- */
+
+                if ( 0==strcmp(G_snippets[i].name, resname) )
+                {
+#ifdef DUMP
+//                    DBG("%s already read", resname);
+#endif
+                    if ( G_snippets[i].modified == fstat.st_mtime )
+                    {
+#ifdef DUMP
+//                        DBG("Not modified");
+#endif
+                        exists_not_changed = TRUE;
+                    }
+                    else
+                    {
+                        INF("%s has been modified", resname);
+                        reread = TRUE;
+                    }
+
+                    break;
+                }
+            }
+
+            if ( exists_not_changed ) continue;   /* not modified */
+        }
+
+        /* find the first unused slot in G_snippets array */
+
+        if ( !reread )
+        {
+            i = first_free_snippet();
+            /* file name */
+            strcpy(G_snippets[i].name, resname);
+        }
+
+        /* last modified */
+
+        G_snippets[i].modified = fstat.st_mtime;
+
+        /* size and content */
+
+#ifdef _WIN32   /* Windows */
+        if ( NULL == (fd=fopen(namewpath, "rb")) )
+#else
+        if ( NULL == (fd=fopen(namewpath, "r")) )
+#endif  /* _WIN32 */
+            ERR("Couldn't open %s", namewpath);
+        else
+        {
+            fseek(fd, 0, SEEK_END);     /* determine the file size */
+            G_snippets[i].len = ftell(fd);
+            rewind(fd);
+
+            /* allocate the final destination */
+
+            if ( reread )
+            {
+                free(G_snippets[i].data);
+                G_snippets[i].data = NULL;
+            }
+
+            G_snippets[i].data = (char*)malloc(G_snippets[i].len+1);
+
+            if ( NULL == G_snippets[i].data )
+            {
+                ERR("Couldn't allocate %u bytes for %s", G_snippets[i].len+1, G_snippets[i].name);
+                fclose(fd);
+                closedir(dir);
+                return FALSE;
+            }
+
+            fread(G_snippets[i].data, G_snippets[i].len, 1, fd);
+
+            fclose(fd);
+
+            /* log file info ----------------------------------- */
+
+            if ( G_logLevel > LOG_INF )
+            {
+                G_ptm = gmtime(&G_snippets[i].modified);
+                sprintf(mod_time, "%d-%02d-%02d %02d:%02d:%02d", G_ptm->tm_year+1900, G_ptm->tm_mon+1, G_ptm->tm_mday, G_ptm->tm_hour, G_ptm->tm_min, G_ptm->tm_sec);
+                G_ptm = gmtime(&G_now);     /* set it back */
+                DBG("%s %s\t\t%u bytes", lib_add_spaces(G_snippets[i].name, 28), mod_time, G_snippets[i].len);
+            }
+        }
+    }
+
+    closedir(dir);
+
+    if ( first_scan && !path ) DBG("");
+
+    return TRUE;
+}
+
+
+/* --------------------------------------------------------------------------
+   OUT snippet
+-------------------------------------------------------------------------- */
+void lib_out_snippet(int ci, const char *name)
+{
+#ifndef SILGY_WATCHER
+    int i;
+
+    for ( i=0; G_snippets[i].name[0] != '-'; ++i )
+    {
+        if ( 0==strcmp(G_snippets[i].name, name) )
+        {
+            OUT_BIN(G_snippets[i].data, G_snippets[i].len);
+            break;
+        }
+    }
+#endif  /* SILGY_WATCHER */
 }
 
 
@@ -553,12 +1599,12 @@ static int xctod(int c)
 /* --------------------------------------------------------------------------
    URI-decode src
 -------------------------------------------------------------------------- */
-static char *uri_decode(char *src, int srclen, char *dest, int maxlen)
+char *uri_decode(char *src, int srclen, char *dest, int maxlen)
 {
-    char    *endp=src+srclen;
-    char    *srcp;
-    char    *destp=dest;
-    int     nwrote=0;
+    char *endp=src+srclen;
+    char *srcp;
+    char *destp=dest;
+    int  written=0;
 
     for ( srcp=src; srcp<endp; ++srcp )
     {
@@ -569,12 +1615,12 @@ static char *uri_decode(char *src, int srclen, char *dest, int maxlen)
             *destp++ = 16 * xctod(*(srcp+1)) + xctod(*(srcp+2));
             srcp += 2;
         }
-        else    /* copy as it is */
+        else
             *destp++ = *srcp;
 
-        ++nwrote;
+        ++written;
 
-        if ( nwrote == maxlen )
+        if ( written == maxlen )
         {
             WAR("URI val truncated");
             break;
@@ -583,235 +1629,7 @@ static char *uri_decode(char *src, int srclen, char *dest, int maxlen)
 
     *destp = EOS;
 
-    return dest;
-}
-
-
-/* --------------------------------------------------------------------------
-   URI-decode src, HTML-escape
-   Duplicated code for speed
--------------------------------------------------------------------------- */
-static char *uri_decode_html_esc(char *src, int srclen, char *dest, int maxlen)
-{
-    char    *endp=src+srclen;
-    char    *srcp;
-    char    *destp=dest;
-    int     nwrote=0;
-    char    tmp;
-
-    maxlen -= 7;
-
-    for ( srcp=src; srcp<endp; ++srcp )
-    {
-        if ( *srcp == '+' )
-        {
-            *destp++ = ' ';
-            ++nwrote;
-        }
-        else if ( *srcp == '%' )
-        {
-            tmp = 16 * xctod(*(srcp+1)) + xctod(*(srcp+2));
-            srcp += 2;
-
-            if ( tmp == '\'' )      /* single quote */
-            {
-                *destp++ = '&';
-                *destp++ = 'a';
-                *destp++ = 'p';
-                *destp++ = 'o';
-                *destp++ = 's';
-                *destp++ = ';';
-                nwrote += 6;
-            }
-            else if ( tmp == '"' )  /* double quote */
-            {
-                *destp++ = '&';
-                *destp++ = 'q';
-                *destp++ = 'u';
-                *destp++ = 'o';
-                *destp++ = 't';
-                *destp++ = ';';
-                nwrote += 6;
-            }
-            else if ( tmp == '\\' ) /* backslash */
-            {
-                *destp++ = '\\';
-                *destp++ = '\\';
-                nwrote += 2;
-            }
-            else if ( tmp == '<' )
-            {
-                *destp++ = '&';
-                *destp++ = 'l';
-                *destp++ = 't';
-                *destp++ = ';';
-                nwrote += 4;
-            }
-            else if ( tmp == '>' )
-            {
-                *destp++ = '&';
-                *destp++ = 'g';
-                *destp++ = 't';
-                *destp++ = ';';
-                nwrote += 4;
-            }
-            else if ( tmp == '&' )
-            {
-                *destp++ = '&';
-                *destp++ = 'a';
-                *destp++ = 'm';
-                *destp++ = 'p';
-                *destp++ = ';';
-                nwrote += 5;
-            }
-            else if ( tmp != '\r' && tmp != '\n' )
-            {
-                *destp++ = tmp;
-                ++nwrote;
-            }
-        }
-        else if ( *srcp == '\'' )    /* ugly but fast -- everything again */
-        {
-            *destp++ = '&';
-            *destp++ = 'a';
-            *destp++ = 'p';
-            *destp++ = 'o';
-            *destp++ = 's';
-            *destp++ = ';';
-            nwrote += 6;
-        }
-        else if ( *srcp == '"' )    /* double quote */
-        {
-            *destp++ = '&';
-            *destp++ = 'q';
-            *destp++ = 'u';
-            *destp++ = 'o';
-            *destp++ = 't';
-            *destp++ = ';';
-            nwrote += 6;
-        }
-        else if ( *srcp == '\\' )   /* backslash */
-        {
-            *destp++ = '\\';
-            *destp++ = '\\';
-            nwrote += 2;
-        }
-        else if ( *srcp == '<' )
-        {
-            *destp++ = '&';
-            *destp++ = 'l';
-            *destp++ = 't';
-            *destp++ = ';';
-            nwrote += 4;
-        }
-        else if ( *srcp == '>' )
-        {
-            *destp++ = '&';
-            *destp++ = 'g';
-            *destp++ = 't';
-            *destp++ = ';';
-            nwrote += 4;
-        }
-        else if ( *srcp == '&' )
-        {
-            *destp++ = '&';
-            *destp++ = 'a';
-            *destp++ = 'm';
-            *destp++ = 'p';
-            *destp++ = ';';
-            nwrote += 5;
-        }
-        else if ( *srcp != '\r' && *srcp != '\n' )
-        {
-            *destp++ = *srcp;
-            ++nwrote;
-        }
-
-        if ( nwrote > maxlen )
-        {
-            WAR("URI val truncated");
-            break;
-        }
-    }
-
-    *destp = EOS;
-
-    return dest;
-}
-
-
-/* --------------------------------------------------------------------------
-   URI-decode src, SQL-escape
-   Duplicated code for speed
--------------------------------------------------------------------------- */
-static char *uri_decode_sql_esc(char *src, int srclen, char *dest, int maxlen)
-{
-    char    *endp=src+srclen;
-    char    *srcp;
-    char    *destp=dest;
-    int     nwrote=0;
-    char    tmp;
-
-    maxlen -= 3;
-
-    for ( srcp=src; srcp<endp; ++srcp )
-    {
-        if ( *srcp == '+' )
-        {
-            *destp++ = ' ';
-            ++nwrote;
-        }
-        else if ( *srcp == '%' )
-        {
-            tmp = 16 * xctod(*(srcp+1)) + xctod(*(srcp+2));
-            srcp += 2;
-
-            if ( tmp == '\'' )      /* single quote */
-            {
-                *destp++ = '\\';
-                *destp++ = '\'';
-                nwrote += 2;
-            }
-            else if ( *srcp == '"' )    /* double quote */
-            {
-                *destp++ = '\\';
-                *destp++ = '"';
-                nwrote += 2;
-            }
-            else if ( tmp == '\\' )     /* backslash */
-            {
-                *destp++ = '\\';
-                *destp++ = '\\';
-                nwrote += 2;
-            }
-        }
-        else if ( *srcp == '\'' )   /* ugly but fast -- everything again */
-        {
-            *destp++ = '\\';
-            *destp++ = '\'';
-            nwrote += 2;
-        }
-        else if ( *srcp == '"' )    /* double quote */
-        {
-            *destp++ = '\\';
-            *destp++ = '"';
-            nwrote += 2;
-        }
-        else if ( *srcp == '\\' )   /* backslash */
-        {
-            *destp++ = '\\';
-            *destp++ = '\\';
-            nwrote += 2;
-        }
-
-        if ( nwrote > maxlen )
-        {
-            WAR("URI val truncated");
-            break;
-        }
-    }
-
-    *destp = EOS;
+    G_qs_len = written;
 
     return dest;
 }
@@ -819,56 +1637,116 @@ static char *uri_decode_sql_esc(char *src, int srclen, char *dest, int maxlen)
 
 #ifndef SILGY_WATCHER
 /* --------------------------------------------------------------------------
-   Get query string value and URI-decode. Return TRUE if found.
+   Get incoming request data. TRUE if found.
 -------------------------------------------------------------------------- */
-bool get_qs_param(int ci, const char *fieldname, char *retbuf)
+bool get_qs_param(int ci, const char *fieldname, char *retbuf, int maxlen, char esc_type)
 {
-    char buf[MAX_URI_VAL_LEN*2+1];
+static char interbuf[65536];
 
-    if ( get_qs_param_raw(ci, fieldname, buf, MAX_URI_VAL_LEN*2) )
+    if ( conn[ci].in_ctype == CONTENT_TYPE_URLENCODED )
     {
-        if ( retbuf ) uri_decode(buf, strlen(buf), retbuf, MAX_URI_VAL_LEN);
-        return TRUE;
-    }
-    else if ( retbuf ) retbuf[0] = EOS;
+static char rawbuf[196608];    /* URL-encoded can have up to 3 times bytes count */
 
-    return FALSE;
+        if ( !get_qs_param_raw(ci, fieldname, rawbuf, maxlen*3-1) )
+        {
+            if ( retbuf ) retbuf[0] = EOS;
+            return FALSE;
+        }
+
+        if ( retbuf )
+            uri_decode(rawbuf, G_qs_len, interbuf, maxlen);
+    }
+    else    /* usually JSON or multipart */
+    {
+        if ( !get_qs_param_raw(ci, fieldname, interbuf, maxlen) )
+        {
+            if ( retbuf ) retbuf[0] = EOS;
+            return FALSE;
+        }
+    }
+
+    /* now we have URI-decoded string in interbuf */
+
+    if ( retbuf )
+    {
+        if ( esc_type == ESC_HTML )
+            sanitize_html(retbuf, interbuf, maxlen);
+        else if ( esc_type == ESC_SQL )
+            sanitize_sql(retbuf, interbuf, maxlen);
+        else
+        {
+            strncpy(retbuf, interbuf, maxlen);
+            retbuf[maxlen] = EOS;
+        }
+    }
+
+    return TRUE;
 }
 
 
 /* --------------------------------------------------------------------------
-   Get, URI-decode and HTML-escape query string value. Return TRUE if found.
+   Get the incoming param if Content-Type == JSON
 -------------------------------------------------------------------------- */
-bool get_qs_param_html_esc(int ci, const char *fieldname, char *retbuf)
+static bool get_qs_param_json(int ci, const char *fieldname, char *retbuf, int maxlen)
 {
-    char buf[MAX_URI_VAL_LEN*2+1];
+static int prev_ci=-1;
+static unsigned prev_req;
+static JSON req={0};
 
-    if ( get_qs_param_raw(ci, fieldname, buf, MAX_URI_VAL_LEN*2) )
+    /* parse JSON only once per request */
+
+    if ( ci != prev_ci || G_cnts_today.req != prev_req )
     {
-        if ( retbuf ) uri_decode_html_esc(buf, strlen(buf), retbuf, MAX_URI_VAL_LEN);
-        return TRUE;
-    }
-    else if ( retbuf ) retbuf[0] = EOS;
+        if ( !REQ_DATA )
+            return FALSE;
 
-    return FALSE;
+        if ( !JSON_FROM_STRING(req, REQ_DATA) )
+            return FALSE;
+
+        prev_ci = ci;
+        prev_req = G_cnts_today.req;
+    }
+
+    if ( !JSON_PRESENT(req, fieldname) )
+        return FALSE;
+
+    strncpy(retbuf, JSON_GET_STR(req, fieldname), maxlen);
+    retbuf[maxlen] = EOS;
+
+    return TRUE;
 }
 
 
 /* --------------------------------------------------------------------------
-   Get, URI-decode and SQL-escape query string value. Return TRUE if found.
+   Get text value from multipart-form-data
 -------------------------------------------------------------------------- */
-bool get_qs_param_sql_esc(int ci, const char *fieldname, char *retbuf)
+static bool get_qs_param_multipart_txt(int ci, const char *fieldname, char *retbuf, int maxlen)
 {
-    char buf[MAX_URI_VAL_LEN*2+1];
+    char     *p;
+    unsigned len;
 
-    if ( get_qs_param_raw(ci, fieldname, buf, MAX_URI_VAL_LEN*2) )
+    p = get_qs_param_multipart(ci, fieldname, &len, NULL);
+
+    if ( !p ) return FALSE;
+
+//    if ( len > MAX_URI_VAL_LEN ) return FALSE;
+
+#ifdef DUMP
+    DBG("len = %d", len);
+#endif
+
+    if ( len > maxlen )
     {
-        if ( retbuf ) uri_decode_sql_esc(buf, strlen(buf), retbuf, MAX_URI_VAL_LEN);
-        return TRUE;
+        len = maxlen;
+#ifdef DUMP
+        DBG("len reduced to %d", len);
+#endif
     }
-    else if ( retbuf ) retbuf[0] = EOS;
 
-    return FALSE;
+    strncpy(retbuf, p, len);
+    retbuf[len] = EOS;
+
+    return TRUE;
 }
 
 
@@ -879,13 +1757,23 @@ bool get_qs_param_raw(int ci, const char *fieldname, char *retbuf, int maxlen)
 {
     char *qs, *end;
 
+    G_qs_len = 0;
+
 #ifdef DUMP
     DBG("get_qs_param_raw: fieldname [%s]", fieldname);
 #endif
 
     if ( conn[ci].post )
     {
-        if ( conn[ci].in_ctype != CONTENT_TYPE_URLENCODED && conn[ci].in_ctype != CONTENT_TYPE_UNSET )
+        if ( conn[ci].in_ctype == CONTENT_TYPE_JSON )
+        {
+            return get_qs_param_json(ci, fieldname, retbuf, maxlen);
+        }
+        else if ( conn[ci].in_ctype == CONTENT_TYPE_MULTIPART )
+        {
+            return get_qs_param_multipart_txt(ci, fieldname, retbuf, maxlen);
+        }
+        else if ( conn[ci].in_ctype != CONTENT_TYPE_URLENCODED && conn[ci].in_ctype != CONTENT_TYPE_UNSET )
         {
             WAR("Invalid Content-Type");
             if ( retbuf ) retbuf[0] = EOS;
@@ -894,7 +1782,7 @@ bool get_qs_param_raw(int ci, const char *fieldname, char *retbuf, int maxlen)
         qs = conn[ci].in_data;
         end = qs + conn[ci].clen;
     }
-    else
+    else    /* GET */
     {
         qs = strchr(conn[ci].uri, '?');
     }
@@ -918,6 +1806,8 @@ bool get_qs_param_raw(int ci, const char *fieldname, char *retbuf, int maxlen)
 
     char *val = qs;
 
+    bool found=FALSE;
+
     while ( val < end )
     {
         val = strstr(val, fieldname);
@@ -937,7 +1827,16 @@ bool get_qs_param_raw(int ci, const char *fieldname, char *retbuf, int maxlen)
         val += fnamelen;
 
         if ( *val == '=' )   /* found */
+        {
+            found = TRUE;
             break;
+        }
+    }
+
+    if ( !found )
+    {
+        if ( retbuf ) retbuf[0] = EOS;
+        return FALSE;
     }
 
     ++val;  /* skip '=' */
@@ -952,53 +1851,17 @@ bool get_qs_param_raw(int ci, const char *fieldname, char *retbuf, int maxlen)
     retbuf[i] = EOS;
 
 #ifdef DUMP
-    DBG("get_qs_param_raw: retbuf [%s]", retbuf);
+    log_long(retbuf, i, "get_qs_param_raw: retbuf");
 #endif
 
-    return TRUE;
-}
-
-
-/* --------------------------------------------------------------------------
-   Get incoming request data -- long string version. TRUE if found.
--------------------------------------------------------------------------- */
-bool get_qs_param_long(int ci, const char *fieldname, char *retbuf)
-{
-    char buf[MAX_LONG_URI_VAL_LEN*2+1];
-
-    if ( get_qs_param_raw(ci, fieldname, buf, MAX_LONG_URI_VAL_LEN*2) )
-    {
-        uri_decode(buf, strlen(buf), retbuf, MAX_LONG_URI_VAL_LEN);
-        return TRUE;
-    }
-
-    return FALSE;
-}
-
-
-/* --------------------------------------------------------------------------
-   Get text value from multipart-form-data
--------------------------------------------------------------------------- */
-bool get_qs_param_multipart_txt(int ci, const char *fieldname, char *retbuf)
-{
-    char     *p;
-    unsigned len;
-
-    p = get_qs_param_multipart(ci, fieldname, &len, NULL);
-
-    if ( !p ) return FALSE;
-
-    if ( len > MAX_URI_VAL_LEN ) return FALSE;
-
-    strncpy(retbuf, p, len);
-    retbuf[len] = EOS;
+    G_qs_len = i;
 
     return TRUE;
 }
 
 
 /* --------------------------------------------------------------------------
-   Experimental multipart-form-data receipt
+   multipart-form-data receipt
    Return length or -1 if error
    If retfname is not NULL then assume binary data and it must be the last
    data element
@@ -1020,6 +1883,9 @@ char *get_qs_param_multipart(int ci, const char *fieldname, unsigned *retlen, ch
         WAR("This is not multipart/form-data");
         return NULL;
     }
+
+    if ( !conn[ci].in_data )
+        return NULL;
 
     if ( conn[ci].clen < 10 )
     {
@@ -1144,7 +2010,7 @@ char *get_qs_param_multipart(int ci, const char *fieldname, unsigned *retlen, ch
 
         b = p - cp;
 
-        if ( b > 255 )
+        if ( b > MAX_URI_VAL_LEN )
         {
             WAR("File name too long (%u)", b);
             return NULL;
@@ -1203,6 +2069,57 @@ char *get_qs_param_multipart(int ci, const char *fieldname, unsigned *retlen, ch
 
 
 /* --------------------------------------------------------------------------
+   Get integer value from the query string
+-------------------------------------------------------------------------- */
+bool lib_qsi(int ci, const char *fieldname, int *retbuf)
+{
+    QSVAL s;
+
+    if ( get_qs_param_raw(ci, fieldname, s, MAX_URI_VAL_LEN) )
+    {
+        *retbuf = atoi(s);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Get float value from the query string
+-------------------------------------------------------------------------- */
+bool lib_qsf(int ci, const char *fieldname, float *retbuf)
+{
+    QSVAL s;
+
+    if ( get_qs_param_raw(ci, fieldname, s, MAX_URI_VAL_LEN) )
+    {
+        sscanf(s, "%f", retbuf);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Get double value from the query string
+-------------------------------------------------------------------------- */
+bool lib_qsd(int ci, const char *fieldname, double *retbuf)
+{
+    QSVAL s;
+
+    if ( get_qs_param_raw(ci, fieldname, s, MAX_URI_VAL_LEN) )
+    {
+        sscanf(s, "%lf", retbuf);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+/* --------------------------------------------------------------------------
    Set response status
 -------------------------------------------------------------------------- */
 void lib_set_res_status(int ci, int status)
@@ -1212,12 +2129,66 @@ void lib_set_res_status(int ci, int status)
 
 
 /* --------------------------------------------------------------------------
+   Set custom header
+-------------------------------------------------------------------------- */
+void lib_res_header(int ci, const char *hdr, const char *val)
+{
+    strcat(conn[ci].cust_headers, hdr);
+    strcat(conn[ci].cust_headers, ": ");
+    strcat(conn[ci].cust_headers, val);
+    strcat(conn[ci].cust_headers, "\r\n");
+}
+
+
+/* --------------------------------------------------------------------------
    Set response content type
+   Mirrored print_content_type
 -------------------------------------------------------------------------- */
 void lib_set_res_content_type(int ci, const char *str)
 {
-    conn[ci].ctype = CONTENT_TYPE_USER;
-    strcpy(conn[ci].ctypestr, str);
+    if ( 0==strcmp(str, "text/html; charset=utf-8") )
+        conn[ci].ctype = RES_HTML;
+    else if ( 0==strcmp(str, "text/plain") )
+        conn[ci].ctype = RES_TEXT;
+    else if ( 0==strcmp(str, "text/css") )
+        conn[ci].ctype = RES_CSS;
+    else if ( 0==strcmp(str, "application/javascript") )
+        conn[ci].ctype = RES_JS;
+    else if ( 0==strcmp(str, "image/gif") )
+        conn[ci].ctype = RES_GIF;
+    else if ( 0==strcmp(str, "image/jpeg") )
+        conn[ci].ctype = RES_JPG;
+    else if ( 0==strcmp(str, "image/x-icon") )
+        conn[ci].ctype = RES_ICO;
+    else if ( 0==strcmp(str, "image/png") )
+        conn[ci].ctype = RES_PNG;
+    else if ( 0==strcmp(str, "image/bmp") )
+        conn[ci].ctype = RES_BMP;
+    else if ( 0==strcmp(str, "image/svg+xml") )
+        conn[ci].ctype = RES_SVG;
+    else if ( 0==strcmp(str, "application/json") )
+        conn[ci].ctype = RES_JSON;
+    else if ( 0==strcmp(str, "application/pdf") )
+        conn[ci].ctype = RES_PDF;
+    else if ( 0==strcmp(str, "audio/mpeg") )
+        conn[ci].ctype = RES_AMPEG;
+    else if ( 0==strcmp(str, "application/x-msdownload") )
+        conn[ci].ctype = RES_EXE;
+    else if ( 0==strcmp(str, "application/zip") )
+        conn[ci].ctype = RES_ZIP;
+    else    /* custom */
+    {
+        if ( 0==strncmp(str, "text/html", 9) )
+            conn[ci].ctype = RES_HTML;
+        else if ( 0==strncmp(str, "text/plain", 10) )
+            conn[ci].ctype = RES_TEXT;
+        else if ( !str[0] )
+            conn[ci].ctype = CONTENT_TYPE_UNSET;
+        else
+            conn[ci].ctype = CONTENT_TYPE_USER;
+
+        COPY(conn[ci].ctypestr, str, CONTENT_TYPE_LEN);
+    }
 }
 
 
@@ -1253,57 +2224,11 @@ void lib_set_res_content_disposition(int ci, const char *str, ...)
 -------------------------------------------------------------------------- */
 void lib_send_msg_description(int ci, int code)
 {
-    char cat[256]=MSG_CAT_ERROR;
-    char msg[1024]="";
+    char cat[64];
+    char msg[1024];
 
-    if ( code == OK )
-    {
-        strcpy(cat, MSG_CAT_OK);
-    }
-    else if ( code < ERR_MAX_ENGINE_ERROR )
-    {
-        /* keep default category */
-    }
-#ifdef USERS
-    else if ( code < ERR_MAX_USR_LOGIN_ERROR )
-    {
-        strcpy(cat, MSG_CAT_USR_LOGIN);
-    }
-    else if ( code < ERR_MAX_USR_EMAIL_ERROR )
-    {
-        strcpy(cat, MSG_CAT_USR_EMAIL);
-    }
-    else if ( code < ERR_MAX_USR_PASSWORD_ERROR )
-    {
-        strcpy(cat, MSG_CAT_USR_PASSWORD);
-    }
-    else if ( code < ERR_MAX_USR_REPEAT_PASSWORD_ERROR )
-    {
-        strcpy(cat, MSG_CAT_USR_REPEAT_PASSWORD);
-    }
-    else if ( code < ERR_MAX_USR_OLD_PASSWORD_ERROR )
-    {
-        strcpy(cat, MSG_CAT_USR_OLD_PASSWORD);
-    }
-    else if ( code < ERR_MAX_USR_ERROR )
-    {
-        /* keep default category */
-    }
-    else if ( code < WAR_MAX_USR_WARNING )
-    {
-        strcpy(cat, MSG_CAT_WARNING);
-    }
-    else if ( code < MSG_MAX_USR_MESSAGE )
-    {
-        strcpy(cat, MSG_CAT_MESSAGE);
-    }
-#endif  /* USERS */
-    else    /* app error */
-    {
-        /* keep default category */
-    }
-
-    strcpy(msg, silgy_message_lang(ci, code));
+    strcpy(cat, get_msg_cat(code));
+    strcpy(msg, silgy_message(code));
 
 #ifdef MSG_FORMAT_JSON
     OUT("{\"code\":%d,\"category\":\"%s\",\"message\":\"%s\"}", code, cat, msg);
@@ -1341,13 +2266,12 @@ static void format_counters(counters_fmt_t *s, counters_t *n)
 /* --------------------------------------------------------------------------
    Users info
 -------------------------------------------------------------------------- */
-static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
+static void users_info(int ci, char activity, int rows, admin_info_t ai[], int ai_cnt)
 {
 #ifdef DBMYSQL
     char        sql[SQLBUF];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    unsigned    records;
 
     char ai_sql[SQLBUF]="";
 
@@ -1362,7 +2286,47 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
         }
     }
 
-    sprintf(sql, "SELECT id, login, email, name, status, created, last_login, visits%s FROM users ORDER BY last_login DESC, created DESC", ai_sql);
+//    sprintf(sql, "SELECT id, login, email, name, status, created, last_login, visits%s FROM users ORDER BY last_login DESC, created DESC", ai_sql);
+    sprintf(sql, "SELECT id, login, email, name, status, created, last_login, visits%s FROM users", ai_sql);
+
+    char activity_desc[64];
+    int days;
+
+    if ( activity == AI_USERS_YAU )
+    {
+        strcpy(activity_desc, "yearly active");
+        days = 366;
+    }
+    else if ( activity == AI_USERS_MAU )
+    {
+        strcpy(activity_desc, "monthly active");
+        days = 31;
+    }
+    else if ( activity == AI_USERS_DAU )
+    {
+        strcpy(activity_desc, "daily active");
+        days = 2;
+    }
+    else    /* all */
+    {
+        strcpy(activity_desc, "all");
+        days = 0;
+    }
+        
+    char tmp[256];
+
+    if ( days==366 || days==31 )
+    {
+        sprintf(tmp, " WHERE status=%d AND visits>0 AND DATEDIFF('%s', last_login)<%d", USER_STATUS_ACTIVE, DT_NOW, days);
+        strcat(sql, tmp);
+    }
+    else if ( days==2 )   /* last 24 hours */
+    {
+        sprintf(tmp, " WHERE status=%d AND visits>0 AND TIME_TO_SEC(TIMEDIFF('%s', last_login))<86401", USER_STATUS_ACTIVE, DT_NOW);
+        strcat(sql, tmp);
+    }
+
+    strcat(sql, " ORDER BY last_login DESC, created DESC");
 
     DBG("sql: %s", sql);
 
@@ -1378,11 +2342,9 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
         return;
     }
 
-    OUT("<h2>Users</h2>");
+    int records = mysql_num_rows(result);
 
-    records = mysql_num_rows(result);
-
-    DBG("admin: %u record(s) found", records);
+    INF("admin_info: %d %s user(s)", records, activity_desc);
 
     int last_to_show = records<rows?records:rows;
 
@@ -1391,9 +2353,9 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
 
     amt(formatted1, records);
     amt(formatted2, last_to_show);
-    OUT("<p>%s users, showing %s of last seen</p>", formatted1, formatted2);
+    OUT("<p>%s %s users, showing %s of last seen</p>", formatted1, activity_desc, formatted2);
 
-    OUT("<table cellpadding=4 border=1>");
+    OUT("<table cellpadding=4 border=1 style=\"margin-bottom:3em;\">");
 
     char ai_th[1024]="";
 
@@ -1417,14 +2379,14 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
 
     OUT("</tr>");
 
-//    long    id;                     /* row[0] */
+//    int     id;                     /* row[0] */
 //    char    login[LOGIN_LEN+1];     /* row[1] */
 //    char    email[EMAIL_LEN+1];     /* row[2] */
 //    char    name[UNAME_LEN+1];      /* row[3] */
-//    short   status;                 /* row[4] */
+//    char    status;                 /* row[4] */
 //    char    created[32];            /* row[5] */
 //    char    last_login[32];         /* row[6] */
-//    long    visits;                 /* row[7] */
+//    int     visits;                 /* row[7] */
 
     char fmt0[64];  /* id */
     char fmt7[64];  /* visits */
@@ -1440,8 +2402,8 @@ static void users_info(int ci, int rows, admin_info_t ai[], int ai_cnt)
     {
         row = mysql_fetch_row(result);
 
-        amt(fmt0, atol(row[0]));    /* id */
-        amt(fmt7, atol(row[7]));    /* visits */
+        amt(fmt0, atoi(row[0]));    /* id */
+        amt(fmt7, atoi(row[7]));    /* visits */
 
         if ( atoi(row[4]) != USER_STATUS_ACTIVE )
             strcpy(trstyle, " class=g");
@@ -1517,6 +2479,10 @@ void silgy_admin_info(int ci, int users, admin_info_t ai[], int ai_cnt, bool hea
 #endif  /* USERS */
 
     /* ------------------------------------------------------------------- */
+
+    INF("admin_info: --------------------");
+//    INF("admin_info: 2019-11-08 10:56:19"
+    INF("admin_info: %s", DT_NOW);
 
     if ( header_n_footer )
     {
@@ -1634,7 +2600,13 @@ void silgy_admin_info(int ci, int users, admin_info_t ai[], int ai_cnt, bool hea
     /* Users */
 #ifdef USERS
     if ( users > 0 )
-        users_info(ci, users, ai, ai_cnt);
+    {
+        OUT("<h2>Users</h2>");
+        users_info(ci, AI_USERS_ALL, users, ai, ai_cnt);
+        users_info(ci, AI_USERS_YAU, users, ai, ai_cnt);
+        users_info(ci, AI_USERS_MAU, users, ai, ai_cnt);
+        users_info(ci, AI_USERS_DAU, users, ai, ai_cnt);
+    }
 #endif
 
     if ( header_n_footer )
@@ -1886,29 +2858,22 @@ static int rest_render_req(char *buffer, const char *method, const char *host, c
         if ( json )     /* JSON -> string conversion */
         {
             if ( !rest_header_present("Content-Type") )
-                p = stpcpy(p, "Content-Type: application/json\r\n");
+                p = stpcpy(p, "Content-Type: application/json; charset=utf-8\r\n");
 
             strcpy(jtmp, lib_json_to_string((JSON*)req));
         }
         else
         {
             if ( !rest_header_present("Content-Type") )
-                p = stpcpy(p, "Content-Type: application/x-www-form-urlencoded\r\n");
+                p = stpcpy(p, "Content-Type: application/x-www-form-urlencoded; charset=utf-8\r\n");
         }
         char tmp[64];
-        sprintf(tmp, "Content-Length: %ld\r\n", (long)strlen(json?jtmp:(char*)req));
+        sprintf(tmp, "Content-Length: %d\r\n", strlen(json?jtmp:(char*)req));
         p = stpcpy(p, tmp);
     }
 
     if ( json && !rest_header_present("Accept") )
         p = stpcpy(p, "Accept: application/json\r\n");
-
-/*    if ( !rest_header_present("Accept-Encoding") )
-        p = stpcpy(p, "Accept-Encoding: gzip, deflate, br\r\n");
-
-    p = stpcpy(p, "Pragma: no-cache\r\n");
-    p = stpcpy(p, "Cache-Control: no-cache\r\n");
-    p = stpcpy(p, "Accept-Language: en-GB,en;q=0.9\r\n"); */
 
     int i;
 
@@ -2286,7 +3251,10 @@ static int rest_res_content_length(const char *buffer, int len)
 {
     const char *p;
 
-    if ( (p=strstr(buffer, "\nContent-Length: ")) == NULL ) return -1;
+    if ( (p=strstr(buffer, "\nContent-Length: ")) == NULL
+            && (p=strstr(buffer, "\nContent-length: ")) == NULL
+            && (p=strstr(buffer, "\ncontent-length: ")) == NULL )
+        return -1;
 
     if ( len < (p-buffer) + 18 ) return -1;
 
@@ -2858,6 +3826,8 @@ static char res_content[JSON_BUFSIZE];
 
     DBG("Read %d bytes of content", content_read);
 
+    G_rest_res_len = content_read;
+
 #ifdef DUMP
     log_long(res_content, content_read, "Content");
 #endif
@@ -3249,7 +4219,7 @@ struct timespec end;
 -------------------------------------------------------------------------- */
 void lib_log_memory()
 {
-    long        mem_used;
+    int         mem_used;
     char        mem_used_kb[32];
     char        mem_used_mb[32];
     char        mem_used_gb[32];
@@ -3357,7 +4327,7 @@ static char dst[4096];
                 || (src[i] >= 97 && src[i] <= 122)
                 || isdigit(src[i]) )
             dst[j++] = src[i];
-        else if ( src[i] == ' ' )
+        else if ( src[i] == ' ' || src[i] == '\t' || src[i] == '\n' )
             dst[j++] = '_';
 
         ++i;
@@ -3422,12 +4392,48 @@ static char ret[4096];
 
 
 /* --------------------------------------------------------------------------
+   Get the file extension
+-------------------------------------------------------------------------- */
+char *get_file_ext(const char *fname)
+{
+static char ext[256];
+    char *pext=NULL;
+
+#ifdef DUMP
+    DBG("name: [%s]", fname);
+#endif
+
+    if ( (pext=(char*)strrchr(fname, '.')) == NULL )     /* no dot */
+    {
+        ext[0] = EOS;
+        return ext;
+    }
+
+    if ( pext-fname == strlen(fname)-1 )        /* dot is the last char */
+    {
+        ext[0] = EOS;
+        return ext;
+    }
+
+    ++pext;
+
+    strcpy(ext, pext);
+
+#ifdef DUMP
+    DBG("ext: [%s]", ext);
+#endif
+
+    return ext;
+}
+
+
+/* --------------------------------------------------------------------------
    Determine resource type by its extension
 -------------------------------------------------------------------------- */
 char get_res_type(const char *fname)
 {
-    char    *ext=NULL;
-    char    uext[8]="";
+    char *ext=NULL;
+    char uext[8]="";
 
 #ifdef DUMP
 //  DBG("name: [%s]", fname);
@@ -3482,7 +4488,7 @@ char get_res_type(const char *fname)
 
 
 /* --------------------------------------------------------------------------
-  convert URI (YYYY-MM-DD) date to tm struct
+   Convert URI (YYYY-MM-DD) date to tm struct
 -------------------------------------------------------------------------- */
 void date_str2rec(const char *str, date_t *rec)
 {
@@ -3505,23 +4511,28 @@ void date_str2rec(const char *str, date_t *rec)
         return;
     }
 
-    for (i=0; i<len; ++i)
+    for ( i=0; i<len; ++i )
     {
         if ( str[i] != '-' )
+        {
+//            DBG("str[i] = %c", str[i]);
             strtmp[j++] = str[i];
+        }
         else    /* end of part */
         {
             strtmp[j] = EOS;
+
             if ( part == 'Y' )  /* year */
             {
                 rec->year = atoi(strtmp);
                 part = 'M';
             }
-            else if ( part == 'M' ) /* month */
+            else if ( part == 'M' )  /* month */
             {
                 rec->month = atoi(strtmp);
                 part = 'D';
             }
+
             j = 0;
         }
     }
@@ -3539,6 +4550,55 @@ void date_str2rec(const char *str, date_t *rec)
 void date_rec2str(char *str, date_t *rec)
 {
     sprintf(str, "%d-%02d-%02d", rec->year, rec->month, rec->day);
+}
+
+
+/* --------------------------------------------------------------------------
+   Is year leap?
+-------------------------------------------------------------------------- */
+static bool leap(short year)
+{
+    year += 1900;
+    
+    if ( year % 4 == 0 && ((year % 100) != 0 || (year % 400) == 0) )
+        return TRUE;
+    
+    return FALSE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Convert database datetime to epoch time
+-------------------------------------------------------------------------- */
+static time_t win_timegm(struct tm *t)
+{
+    time_t epoch;
+
+    static int days[2][12]={
+        {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31},
+        {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+    };
+
+    int i;
+
+    for ( i=70; i<t->tm_year; ++i )
+        epoch += leap(i)?366:365;
+
+    for ( i=0; i<t->tm_mon; ++i )
+        epoch += days[leap(t->tm_year)][i];
+
+    epoch += t->tm_mday - 1;
+    epoch *= 24;
+
+    epoch += t->tm_hour;
+    epoch *= 60;
+
+    epoch += t->tm_min;
+    epoch *= 60;
+
+    epoch += t->tm_sec;
+
+    return epoch;
 }
 
 
@@ -3624,7 +4684,7 @@ struct tm   tm;
 #ifdef __linux__
     epoch = timegm(&tm);
 #else
-    epoch = mktime(&tm);
+    epoch = win_timegm(&tm);
 #endif
 
     // temporarily
@@ -3687,7 +4747,7 @@ struct tm   tm;
 #ifdef __linux__
     epoch = timegm(&tm);
 #else
-    epoch = mktime(&tm);
+    epoch = win_timegm(&tm);
 #endif
 
     return epoch;
@@ -3721,31 +4781,29 @@ static char str[32];
 ---------------------------------------------------------------------------*/
 void lib_set_datetime_formats(const char *lang)
 {
-    char ulang[8];
-
+#ifdef DUMP
     DBG("lib_set_datetime_formats, lang [%s]", lang);
+#endif
 
-    strcpy(ulang, upper(lang));
+    /* date format */
 
-    // date format
-
-    if ( 0==strcmp(ulang, "EN-US") )
+    if ( 0==strcmp(lang, "EN-US") )
         M_df = 1;
-    else if ( 0==strcmp(ulang, "EN-GB") || 0==strcmp(ulang, "EN-AU") || 0==strcmp(ulang, "FR-FR") || 0==strcmp(ulang, "EN-IE") || 0==strcmp(ulang, "ES-ES") || 0==strcmp(ulang, "IT-IT") || 0==strcmp(ulang, "PT-PT") || 0==strcmp(ulang, "PT-BR") || 0==strcmp(ulang, "ES-AR") )
+    else if ( 0==strcmp(lang, "EN-GB") || 0==strcmp(lang, "EN-AU") || 0==strcmp(lang, "FR-FR") || 0==strcmp(lang, "EN-IE") || 0==strcmp(lang, "ES-ES") || 0==strcmp(lang, "IT-IT") || 0==strcmp(lang, "PT-PT") || 0==strcmp(lang, "PT-BR") || 0==strcmp(lang, "ES-AR") )
         M_df = 2;
-    else if ( 0==strcmp(ulang, "PL-PL") || 0==strcmp(ulang, "RU-RU") || 0==strcmp(ulang, "DE-CH") || 0==strcmp(ulang, "FR-CH") )
+    else if ( 0==strcmp(lang, "PL-PL") || 0==strcmp(lang, "RU-RU") || 0==strcmp(lang, "DE-CH") || 0==strcmp(lang, "FR-CH") )
         M_df = 3;
     else
         M_df = 0;
 
-    // amount format
+    /* amount format */
 
-    if ( 0==strcmp(ulang, "EN-US") || 0==strcmp(ulang, "EN-GB") || 0==strcmp(ulang, "EN-AU") || 0==strcmp(ulang, "TH-TH") )
+    if ( 0==strcmp(lang, "EN-US") || 0==strcmp(lang, "EN-GB") || 0==strcmp(lang, "EN-AU") || 0==strcmp(lang, "TH-TH") )
     {
         M_tsep = ',';
         M_dsep = '.';
     }
-    else if ( 0==strcmp(ulang, "PL-PL") || 0==strcmp(ulang, "IT-IT") || 0==strcmp(ulang, "NB-NO") || 0==strcmp(ulang, "ES-ES") )
+    else if ( 0==strcmp(lang, "PL-PL") || 0==strcmp(lang, "IT-IT") || 0==strcmp(lang, "NB-NO") || 0==strcmp(lang, "ES-ES") )
     {
         M_tsep = '.';
         M_dsep = ',';
@@ -3755,6 +4813,19 @@ void lib_set_datetime_formats(const char *lang)
         M_tsep = ' ';
         M_dsep = ',';
     }
+}
+
+
+/* --------------------------------------------------------------------------
+   Format amount
+---------------------------------------------------------------------------*/
+char *silgy_amt(double val)
+{
+static char str[64];
+
+    amtd(str, val);
+
+    return str;
 }
 
 
@@ -3972,11 +5043,59 @@ static char date[16];
 char *silgy_sql_esc(const char *str)
 {
 static char dst[MAX_LONG_URI_VAL_LEN+1];
-    int     i=0, j=0;
+
+    sanitize_sql(dst, str, MAX_LONG_URI_VAL_LEN);
+
+    return dst;
+}
+
+
+/* --------------------------------------------------------------------------
+   HTML-escape string
+-------------------------------------------------------------------------- */
+char *silgy_html_esc(const char *str)
+{
+static char dst[MAX_LONG_URI_VAL_LEN+1];
+
+    sanitize_html(dst, str, MAX_LONG_URI_VAL_LEN);
+
+    return dst;
+}
+
+
+/* --------------------------------------------------------------------------
+   SQL-escape string respecting destination length (excluding '\0')
+-------------------------------------------------------------------------- */
+void sanitize_sql_old(char *dest, const char *str, int len)
+{
+    strncpy(dest, silgy_sql_esc(str), len);
+    dest[len] = EOS;
+
+    /* cut off orphaned single backslash */
+
+    int i=len-1;
+    int bs=0;
+    while ( dest[i]=='\\' && i>-1 )
+    {
+        ++bs;
+        i--;
+    }
+
+    if ( bs % 2 )   /* odd number of trailing backslashes -- cut one */
+        dest[len-1] = EOS;
+}
+
+
+/* --------------------------------------------------------------------------
+   SQL-escape string respecting destination length (excluding '\0')
+-------------------------------------------------------------------------- */
+void sanitize_sql(char *dst, const char *str, int len)
+{
+    int i=0, j=0;
 
     while ( str[i] )
     {
-        if ( j > MAX_LONG_URI_VAL_LEN-3 )
+        if ( j > len-3 )
             break;
         else if ( str[i] == '\'' )
         {
@@ -3999,22 +5118,19 @@ static char dst[MAX_LONG_URI_VAL_LEN+1];
     }
 
     dst[j] = EOS;
-
-    return dst;
 }
 
 
 /* --------------------------------------------------------------------------
-   HTML-escape string
+   HTML-escape string respecting destination length (excluding '\0')
 -------------------------------------------------------------------------- */
-char *silgy_html_esc(const char *str)
+void sanitize_html(char *dst, const char *str, int len)
 {
-static char dst[MAX_LONG_URI_VAL_LEN+1];
-    int     i=0, j=0;
+    int i=0, j=0;
 
     while ( str[i] )
     {
-        if ( j > MAX_LONG_URI_VAL_LEN-7 )
+        if ( j > len-7 )
             break;
         else if ( str[i] == '\'' )
         {
@@ -4025,11 +5141,6 @@ static char dst[MAX_LONG_URI_VAL_LEN+1];
             dst[j++] = 's';
             dst[j++] = ';';
         }
-        else if ( str[i] == '\\' )
-        {
-            dst[j++] = '\\';
-            dst[j++] = '\\';
-        }
         else if ( str[i] == '"' )
         {
             dst[j++] = '&';
@@ -4038,6 +5149,11 @@ static char dst[MAX_LONG_URI_VAL_LEN+1];
             dst[j++] = 'o';
             dst[j++] = 't';
             dst[j++] = ';';
+        }
+        else if ( str[i] == '\\' )
+        {
+            dst[j++] = '\\';
+            dst[j++] = '\\';
         }
         else if ( str[i] == '<' )
         {
@@ -4074,31 +5190,6 @@ static char dst[MAX_LONG_URI_VAL_LEN+1];
     }
 
     dst[j] = EOS;
-
-    return dst;
-}
-
-
-/* --------------------------------------------------------------------------
-   SQL-escape string respecting destination length (excluding '\0')
--------------------------------------------------------------------------- */
-void sanitize_sql(char *dest, const char *str, int len)
-{
-    strncpy(dest, silgy_sql_esc(str), len);
-    dest[len] = EOS;
-
-    /* cut off orphaned single backslash */
-
-    int i=len-1;
-    int bs=0;
-    while ( dest[i]=='\\' && i>-1 )
-    {
-        ++bs;
-        i--;
-    }
-
-    if ( bs % 2 )   /* odd number of trailing backslashes -- cut one */
-        dest[len-1] = EOS;
 }
 
 
@@ -4194,28 +5285,6 @@ static char dst[MAX_LONG_URI_VAL_LEN+1];
 
 
 /* --------------------------------------------------------------------------
-   Primitive URI encoding
----------------------------------------------------------------------------*/
-/*char *uri_encode(const char *str)
-{
-static char uri_encode[4096];
-    int     i;
-
-    for ( i=0; str[i] && i<4095; ++i )
-    {
-        if ( str[i] == ' ' )
-            uri_encode[i] = '+';
-        else
-            uri_encode[i] = str[i];
-    }
-
-    uri_encode[i] = EOS;
-
-    return uri_encode;
-}*/
-
-
-/* --------------------------------------------------------------------------
    Convert string to upper
 ---------------------------------------------------------------------------*/
 char *upper(const char *str)
@@ -4291,6 +5360,8 @@ char *nospaces(char *dst, const char *src)
 }
 
 
+
+#ifndef SILGY_WATCHER
 /* --------------------------------------------------------------------------
    Return a random 8-bit number from M_random_numbers
 -------------------------------------------------------------------------- */
@@ -4600,6 +5671,7 @@ static int  since_seed=0;
     DBG("silgy_random took %.3lf ms", lib_elapsed(&start));
 #endif
 }
+#endif  /* SILGY_WATCHER */
 
 
 /* --------------------------------------------------------------------------
@@ -4725,14 +5797,18 @@ static void json_to_string(char *dst, JSON *json, bool array)
         }
         else if ( json->rec[i].type == JSON_RECORD )
         {
+            intptr_t jp;
+            sscanf(json->rec[i].value, "%p", &jp);
             char tmp[JSON_BUFSIZE];
-            json_to_string(tmp, (JSON*)atol(json->rec[i].value), FALSE);
+            json_to_string(tmp, (JSON*)jp, FALSE);
             p = stpcpy(p, tmp);
         }
         else if ( json->rec[i].type == JSON_ARRAY )
         {
+            intptr_t jp;
+            sscanf(json->rec[i].value, "%p", &jp);
             char tmp[JSON_BUFSIZE];
-            json_to_string(tmp, (JSON*)atol(json->rec[i].value), TRUE);
+            json_to_string(tmp, (JSON*)jp, TRUE);
             p = stpcpy(p, tmp);
         }
 
@@ -4808,8 +5884,10 @@ static void json_to_string_pretty(char *dst, JSON *json, bool array, int level)
                 p = stpcpy(p, "\n");
                 p = stpcpy(p, json_indent(level));
             }
+            intptr_t jp;
+            sscanf(json->rec[i].value, "%p", &jp);
             char tmp[JSON_BUFSIZE];
-            json_to_string_pretty(tmp, (JSON*)atol(json->rec[i].value), FALSE, level+1);
+            json_to_string_pretty(tmp, (JSON*)jp, FALSE, level+1);
             p = stpcpy(p, tmp);
         }
         else if ( json->rec[i].type == JSON_ARRAY )
@@ -4819,8 +5897,10 @@ static void json_to_string_pretty(char *dst, JSON *json, bool array, int level)
                 p = stpcpy(p, "\n");
                 p = stpcpy(p, json_indent(level));
             }
+            intptr_t jp;
+            sscanf(json->rec[i].value, "%p", &jp);
             char tmp[JSON_BUFSIZE];
-            json_to_string_pretty(tmp, (JSON*)atol(json->rec[i].value), TRUE, level+1);
+            json_to_string_pretty(tmp, (JSON*)jp, TRUE, level+1);
             p = stpcpy(p, tmp);
         }
 
@@ -4953,6 +6033,7 @@ bool lib_json_from_string(JSON *json, const char *src, int len, int level)
     char    value[JSON_VAL_LEN+1];
     int     index;
     char    now_key=0, now_value=0, inside_array=0, type;
+    double  flo_value;
 
 static JSON json_pool[JSON_POOL_SIZE*JSON_MAX_LEVELS];
 static int  json_pool_cnt[JSON_MAX_LEVELS]={0};
@@ -5149,7 +6230,9 @@ static char tmp[JSON_BUFSIZE];
                 j = 0;
             }
         }
-        else if ( now_value && ((type==JSON_STRING && src[i]=='"' && src[i-1]!='\\') || src[i]==',' || src[i]=='}' || src[i]==']' || src[i]=='\r' || src[i]=='\n') )     /* end of value */
+        else if ( now_value
+                    && ((type==JSON_STRING && src[i]=='"' && src[i-1]!='\\')
+                            || (type!=JSON_STRING && (src[i]==',' || src[i]=='}' || src[i]==']' || src[i]=='\r' || src[i]=='\n'))) )     /* end of value */
         {
             value[j] = EOS;
 #ifdef DUMP
@@ -5168,9 +6251,12 @@ static char tmp[JSON_BUFSIZE];
                 else if ( value[0]=='f' )
                     lib_json_add(json, NULL, NULL, 0, 0, JSON_BOOL, index);
                 else if ( strchr(value, '.') )
-                    lib_json_add(json, NULL, NULL, 0, atof(value), JSON_FLOAT, index);
+                {
+                    sscanf(value, "%lf", &flo_value);
+                    lib_json_add(json, NULL, NULL, 0, flo_value, JSON_FLOAT, index);
+                }
                 else
-                    lib_json_add(json, NULL, NULL, atol(value), 0, JSON_INTEGER, index);
+                    lib_json_add(json, NULL, NULL, atoi(value), 0, JSON_INTEGER, index);
             }
             else
             {
@@ -5181,9 +6267,12 @@ static char tmp[JSON_BUFSIZE];
                 else if ( value[0]=='f' )
                     lib_json_add(json, key, NULL, 0, 0, JSON_BOOL, -1);
                 else if ( strchr(value, '.') )
-                    lib_json_add(json, key, NULL, 0, atof(value), JSON_FLOAT, -1);
+                {
+                    sscanf(value, "%lf", &flo_value);
+                    lib_json_add(json, key, NULL, 0, flo_value, JSON_FLOAT, -1);
+                }
                 else
-                    lib_json_add(json, key, NULL, atol(value), 0, JSON_INTEGER, -1);
+                    lib_json_add(json, key, NULL, atoi(value), 0, JSON_INTEGER, -1);
             }
 
             now_value = 0;
@@ -5296,7 +6385,7 @@ void lib_json_log_inf(JSON *json, const char *name)
 /* --------------------------------------------------------------------------
    Add/set value to a JSON buffer
 -------------------------------------------------------------------------- */
-bool lib_json_add(JSON *json, const char *name, const char *str_value, long int_value, double flo_value, char type, int i)
+bool lib_json_add(JSON *json, const char *name, const char *str_value, int int_value, double flo_value, char type, int i)
 {
 #ifdef AUTO_INIT_EXPERIMENT
     json_auto_init(json);
@@ -5311,8 +6400,8 @@ bool lib_json_add(JSON *json, const char *name, const char *str_value, long int_
             if ( json->cnt >= JSON_MAX_ELEMS ) return FALSE;
             i = json->cnt;
             ++json->cnt;
-            strncpy(json->rec[i].name, name, 31);
-            json->rec[i].name[31] = EOS;
+            strncpy(json->rec[i].name, name, JSON_KEY_LEN);
+            json->rec[i].name[JSON_KEY_LEN] = EOS;
             json->array = FALSE;
         }
     }
@@ -5337,11 +6426,11 @@ bool lib_json_add(JSON *json, const char *name, const char *str_value, long int_
     }
     else if ( type == JSON_INTEGER )
     {
-        sprintf(json->rec[i].value, "%ld", int_value);
+        sprintf(json->rec[i].value, "%d", int_value);
     }
     else    /* float */
     {
-        snprintf(json->rec[i].value, 256, "%f", flo_value);
+        snprintf(json->rec[i].value, JSON_VAL_LEN, "%lf", flo_value);
     }
 
     json->rec[i].type = type;
@@ -5373,8 +6462,8 @@ bool lib_json_add_record(JSON *json, const char *name, JSON *json_sub, bool is_a
             if ( json->cnt >= JSON_MAX_ELEMS ) return FALSE;
             i = json->cnt;
             ++json->cnt;
-            strncpy(json->rec[i].name, name, 31);
-            json->rec[i].name[31] = EOS;
+            strncpy(json->rec[i].name, name, JSON_KEY_LEN);
+            json->rec[i].name[JSON_KEY_LEN] = EOS;
             json->array = FALSE;
         }
     }
@@ -5390,11 +6479,28 @@ bool lib_json_add_record(JSON *json, const char *name, JSON *json_sub, bool is_a
 
     /* store sub-record address as a text in value */
 
-    sprintf(json->rec[i].value, "%ld", (long)json_sub);
+    sprintf(json->rec[i].value, "%p", json_sub);
 
     json->rec[i].type = is_array?JSON_ARRAY:JSON_RECORD;
 
     return TRUE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Check value presence in JSON buffer
+-------------------------------------------------------------------------- */
+bool lib_json_present(JSON *json, const char *name)
+{
+    int i;
+
+    for ( i=0; i<json->cnt; ++i )
+    {
+        if ( 0==strcmp(json->rec[i].name, name) )
+            return TRUE;
+    }
+
+    return FALSE;
 }
 
 
@@ -5449,7 +6555,7 @@ static char dst[JSON_VAL_LEN+1];
 /* --------------------------------------------------------------------------
    Get value from JSON buffer
 -------------------------------------------------------------------------- */
-long lib_json_get_int(JSON *json, const char *name, int i)
+int lib_json_get_int(JSON *json, const char *name, int i)
 {
     if ( !name )    /* array elem */
     {
@@ -5460,7 +6566,7 @@ long lib_json_get_int(JSON *json, const char *name, int i)
         }
 
         if ( json->rec[i].type == JSON_INTEGER )
-            return atol(json->rec[i].value);
+            return atoi(json->rec[i].value);
         else    /* types don't match */
             return 0;
     }
@@ -5471,7 +6577,7 @@ long lib_json_get_int(JSON *json, const char *name, int i)
         {
             if ( json->rec[i].type == JSON_INTEGER )
             {
-                return atol(json->rec[i].value);
+                return atoi(json->rec[i].value);
             }
 
             return 0;   /* types don't match or couldn't convert */
@@ -5487,6 +6593,8 @@ long lib_json_get_int(JSON *json, const char *name, int i)
 -------------------------------------------------------------------------- */
 double lib_json_get_float(JSON *json, const char *name, int i)
 {
+    double flo_value;
+
     if ( !name )    /* array elem */
     {
         if ( i >= json->cnt )
@@ -5496,7 +6604,10 @@ double lib_json_get_float(JSON *json, const char *name, int i)
         }
 
         if ( json->rec[i].type == JSON_FLOAT )
-            return atof(json->rec[i].value);
+        {
+            sscanf(json->rec[i].value, "%lf", &flo_value);
+            return flo_value;
+        }
         else    /* types don't match */
             return 0;
     }
@@ -5507,7 +6618,8 @@ double lib_json_get_float(JSON *json, const char *name, int i)
         {
             if ( json->rec[i].type == JSON_FLOAT )
             {
-                return atof(json->rec[i].value);
+                sscanf(json->rec[i].value, "%lf", &flo_value);
+                return flo_value;
             }
 
             return 0;   /* types don't match or couldn't convert */
@@ -5599,7 +6711,9 @@ bool lib_json_get_record(JSON *json, const char *name, JSON *json_sub, int i)
 #endif
         if ( json->rec[i].type == JSON_RECORD || json->rec[i].type == JSON_ARRAY )
         {
-            memcpy(json_sub, (JSON*)atol(json->rec[i].value), sizeof(JSON));
+            intptr_t jp;
+            sscanf(json->rec[i].value, "%p", &jp);
+            memcpy(json_sub, (JSON*)jp, sizeof(JSON));
             return TRUE;
         }
         else
@@ -5619,7 +6733,9 @@ bool lib_json_get_record(JSON *json, const char *name, JSON *json_sub, int i)
 //            DBG("lib_json_get_record, found [%s]", name);
             if ( json->rec[i].type == JSON_RECORD || json->rec[i].type == JSON_ARRAY )
             {
-                memcpy(json_sub, (JSON*)atol(json->rec[i].value), sizeof(JSON));
+                intptr_t jp;
+                sscanf(json->rec[i].value, "%p", &jp);
+                memcpy(json_sub, (JSON*)jp, sizeof(JSON));
                 return TRUE;
             }
 
@@ -5714,11 +6830,11 @@ static void get_byteorder64()
 -------------------------------------------------------------------------- */
 time_t db2epoch(const char *str)
 {
-
+    time_t  epoch;
     int     i;
     int     j=0;
     char    part='Y';
-    char    strtmp[8];
+    char    tmp[8];
 struct tm   t={0};
 
 /*  DBG("db2epoch: str: [%s]", str); */
@@ -5726,45 +6842,55 @@ struct tm   t={0};
     for ( i=0; str[i]; ++i )
     {
         if ( isdigit(str[i]) )
-            strtmp[j++] = str[i];
+        {
+            tmp[j++] = str[i];
+        }
         else    /* end of part */
         {
-            strtmp[j] = EOS;
+            tmp[j] = EOS;
+
             if ( part == 'Y' )  /* year */
             {
-                t.tm_year = atoi(strtmp) - 1900;
+                t.tm_year = atoi(tmp) - 1900;
                 part = 'M';
             }
-            else if ( part == 'M' ) /* month */
+            else if ( part == 'M' )  /* month */
             {
-                t.tm_mon = atoi(strtmp) - 1;
+                t.tm_mon = atoi(tmp) - 1;
                 part = 'D';
             }
-            else if ( part == 'D' ) /* day */
+            else if ( part == 'D' )  /* day */
             {
-                t.tm_mday = atoi(strtmp);
+                t.tm_mday = atoi(tmp);
                 part = 'H';
             }
-            else if ( part == 'H' ) /* hour */
+            else if ( part == 'H' )  /* hour */
             {
-                t.tm_hour = atoi(strtmp);
+                t.tm_hour = atoi(tmp);
                 part = 'm';
             }
-            else if ( part == 'm' ) /* minutes */
+            else if ( part == 'm' )  /* minutes */
             {
-                t.tm_min = atoi(strtmp);
+                t.tm_min = atoi(tmp);
                 part = 's';
             }
+
             j = 0;
         }
     }
 
     /* seconds */
 
-    strtmp[j] = EOS;
-    t.tm_sec = atoi(strtmp);
+    tmp[j] = EOS;
+    t.tm_sec = atoi(tmp);
 
-    return mktime(&t);
+#ifdef __linux__
+    epoch = timegm(&t);
+#else
+    epoch = win_timegm(&t);
+#endif
+
+    return epoch;
 }
 
 
@@ -5794,7 +6920,7 @@ bool silgy_email(const char *to, const char *subject, const char *message)
 //    }
 //#else
     sprintf(sender, "%s <%s@%s>", APP_WEBSITE, EMAIL_FROM_USER, APP_DOMAIN);
-//#endif
+//#endif  /* SILGY_SVC */
 
     sprintf(comm, "/usr/lib/sendmail -t -f \"%s\"", sender);
 
@@ -5821,7 +6947,173 @@ bool silgy_email(const char *to, const char *subject, const char *message)
 #else   /* Windows */
 
     WAR("There's no email service for Windows");
-    return FALSE;
+    return TRUE;
+
+#endif  /* _WIN32 */
+}
+
+
+/* --------------------------------------------------------------------------
+   Convert string to quoted-printable
+-------------------------------------------------------------------------- */
+/*void qp(char *dst, const char *asrc)
+{
+    char *src=(char*)asrc;
+    int curr_line_length = 0;
+    bool first=TRUE;
+
+    while ( *src )
+    {
+        if ( curr_line_length > 72 )
+        {
+            // insert '=' if prev char exists and is not a space
+            if ( !first )
+            {
+                if (*(src-1) != 0x20)
+                    *dst++ = '=';
+            }
+            *dst++ = '\n';
+            curr_line_length = 0;
+        }
+
+        if ( *src == 0x20 )
+        {
+            *dst++ = *src;
+        }
+        else if ( *src >= 33 && *src <= 126 && *src != 61 )
+        {
+            *dst++ = *src;
+            // double escape newline periods
+            // http://tools.ietf.org/html/rfc5321#section-4.5.2
+            if ( curr_line_length == 0 && *src == 46 )
+            {
+                *dst++ = '.';
+            }
+        }
+        else
+        {
+            *dst++ = '=';
+            char hex[8];
+            sprintf(hex, "%x", (*src >> 4) & 0x0F);
+            dst = stpcpy(dst, hex);
+            sprintf(hex, "%x", *src & 0x0F);
+            dst = stpcpy(dst, hex);
+            // 2 more chars bc hex and equals
+            curr_line_length += 2;
+        }
+
+        ++curr_line_length;
+        first = FALSE;
+        ++src;
+    }
+
+    *dst = EOS;
+}*/
+
+
+/* --------------------------------------------------------------------------
+   Send an email with attachement
+-------------------------------------------------------------------------- */
+bool silgy_email_attach(const char *to, const char *subject, const char *message, const char *att_name, const char *att_data, int att_data_len)
+{
+    DBG("Sending email to [%s], subject [%s], with attachement [%s]", to, subject, att_name);
+
+#define BOUNDARY "silgybndGq7ehJxt"
+
+#ifndef _WIN32
+    char    sender[512];
+    char    comm[512];
+
+    sprintf(sender, "%s <%s@%s>", APP_WEBSITE, EMAIL_FROM_USER, APP_DOMAIN);
+
+    sprintf(comm, "/usr/lib/sendmail -t -f \"%s\"", sender);
+
+    FILE *mailpipe = popen(comm, "w");
+
+    if ( mailpipe == NULL )
+    {
+        ERR("Failed to invoke sendmail");
+        return FALSE;
+    }
+    else
+    {
+        fprintf(mailpipe, "From: %s\n", sender);
+        fprintf(mailpipe, "To: %s\n", to);
+        fprintf(mailpipe, "Subject: %s\n", subject);
+        fprintf(mailpipe, "Content-Type: multipart/mixed; boundary=%s\n", BOUNDARY);
+        fprintf(mailpipe, "\n");
+
+        /* message */
+
+        fprintf(mailpipe, "--%s\n", BOUNDARY);
+
+        fprintf(mailpipe, "Content-Type: text/plain; charset=\"utf-8\"\n");
+//        fprintf(mailpipe, "Content-Transfer-Encoding: quoted-printable\n");
+        fprintf(mailpipe, "Content-Disposition: inline\n");
+        fprintf(mailpipe, "\n");
+
+
+/*        char *qpm;
+        int qpm_len = strlen(message) * 4;
+
+        if ( !(qpm=(char*)malloc(qpm_len)) )
+        {
+            ERR("Couldn't allocate %d bytes for qpm", qpm_len);
+            return FALSE;
+        }
+
+        qp(qpm, message);
+
+        DBG("qpm [%s]", qpm); */
+
+        fwrite(message, 1, strlen(message), mailpipe);
+//        fwrite(qpm, 1, strlen(qpm), mailpipe);
+//        free(qpm);
+        fprintf(mailpipe, "\n\n");
+
+
+        /* attachement */
+
+        fprintf(mailpipe, "--%s\n", BOUNDARY);
+
+        fprintf(mailpipe, "Content-Type: application\n");
+        fprintf(mailpipe, "Content-Transfer-Encoding: base64\n");
+        fprintf(mailpipe, "Content-Disposition: attachment; filename=\"%s\"\n", att_name);
+        fprintf(mailpipe, "\n");
+
+        char *b64data;
+        int b64data_len = ((4 * att_data_len / 3) + 3) & ~3;
+
+        DBG("Predicted b64data_len = %d", b64data_len);
+
+        if ( !(b64data=(char*)malloc(b64data_len+16)) )   /* just in case, to be verified */
+        {
+            ERR("Couldn't allocate %d bytes for b64data", b64data_len+16);
+            return FALSE;
+        }
+
+        Base64encode(b64data, att_data, att_data_len);
+        b64data_len = strlen(b64data);
+
+        DBG("     Real b64data_len = %d", b64data_len);
+
+        fwrite(b64data, 1, b64data_len, mailpipe);
+
+        free(b64data);
+
+        /* finish */
+
+        fprintf(mailpipe, "\n\n--%s--\n", BOUNDARY);
+
+        pclose(mailpipe);
+    }
+
+    return TRUE;
+
+#else   /* Windows */
+
+    WAR("There's no email service for Windows");
+    return TRUE;
 
 #endif  /* _WIN32 */
 }
@@ -5926,19 +7218,26 @@ static int minify_2(char *dest, const char *src)
     bool    skip_ws=FALSE;      /* skip white spaces */
     char    word[256]="";
     int     wi=0;               /* word index */
+    int     backslashes=0;
 
     len = strlen(src);
 
     for ( i=0; i<len; ++i )
     {
-        if ( !opensq && src[i]=='"' && (i==0 || (i>0 && src[i-1]!='\\')) )
+        /* 'foo - TRUE */
+        /* \'foo - FALSE */
+        /* \\'foo - TRUE */
+
+        /* odd number of backslashes invalidates the quote */
+
+        if ( !opensq && src[i]=='"' && backslashes%2==0 )
         {
             if ( !opendq )
                 opendq = TRUE;
             else
                 opendq = FALSE;
         }
-        else if ( !opendq && src[i]=='\'' )
+        else if ( !opendq && src[i]=='\'' && backslashes%2==0 )
         {
             if ( !opensq )
                 opensq = TRUE;
@@ -5973,7 +7272,7 @@ static int minify_2(char *dest, const char *src)
             wi = 0;
             skip_ws = TRUE;
         }
-        else if ( !opensq && !opendq && !opencc && !openwo && (isalpha(src[i]) || src[i]=='|' || src[i]=='&') ) /* word is starting */
+        else if ( !opensq && !opendq && !opencc && !openwo && (isalpha(src[i]) || src[i]=='|' || src[i]=='&') )  /* word is starting */
         {
             openwo = TRUE;
         }
@@ -6002,6 +7301,11 @@ static int minify_2(char *dest, const char *src)
         if ( openwo )
             word[wi++] = src[i];
 
+        if ( src[i]=='\\' )
+            ++backslashes;
+        else
+            backslashes = 0;
+
         if ( skip_ws )
         {
             while ( src[i+1] && (src[i+1]==' ' || src[i+1]=='\t' || src[i+1]=='\n' || src[i+1]=='\r') ) ++i;
@@ -6016,8 +7320,8 @@ static int minify_2(char *dest, const char *src)
 
 
 /* --------------------------------------------------------------------------
-  increment date by 'days' days. Return day of week as well.
-  Format: YYYY-MM-DD
+   Increment date by 'days' days. Return day of week as well.
+   Format: YYYY-MM-DD
 -------------------------------------------------------------------------- */
 void date_inc(char *str, int days, int *dow)
 {
@@ -6034,14 +7338,14 @@ void date_inc(char *str, int days, int *dow)
     sprintf(str, "%d-%02d-%02d", G_ptm->tm_year+1900, G_ptm->tm_mon+1, G_ptm->tm_mday);
     *dow = G_ptm->tm_wday;
 
-    G_ptm = gmtime(&G_now);  /* set it back */
+    G_ptm = gmtime(&G_now);   /* set it back */
 
 }
 
 
 /* --------------------------------------------------------------------------
-  compare the dates
-  Format: YYYY-MM-DD
+   Compare dates
+   Format: YYYY-MM-DD
 -------------------------------------------------------------------------- */
 int date_cmp(const char *str1, const char *str2)
 {
@@ -6596,7 +7900,7 @@ void log_write(int level, const char *message, ...)
    Write looong message to a log or --
    its first (MAX_LOG_STR_LEN-50) part if it's longer
 -------------------------------------------------------------------------- */
-void log_long(const char *message, long len, const char *desc)
+void log_long(const char *message, int len, const char *desc)
 {
     if ( G_logLevel < LOG_DBG ) return;
 
@@ -6647,7 +7951,7 @@ void log_finish()
 /* --------------------------------------------------------------------------
    Convert string
 -------------------------------------------------------------------------- */
-char *silgy_convert(char *src, const char *cp_from, const char *cp_to)
+char *silgy_convert(const char *src, const char *cp_from, const char *cp_to)
 {
 static char dst[4096];
 
@@ -6659,7 +7963,7 @@ static char dst[4096];
         return dst;
     }
 
-    char *in_buf = src;
+    const char *in_buf = src;
     size_t in_left = strlen(src);
 
     char *out_buf = &dst[0];
@@ -6667,7 +7971,7 @@ static char dst[4096];
 
     do
     {
-        if ( iconv(cd, &in_buf, &in_left, &out_buf, &out_left) == (size_t)-1 )
+        if ( iconv(cd, (char**)&in_buf, &in_left, &out_buf, &out_left) == (size_t)-1 )
         {
             strcpy(dst, "iconv failed");
             return dst;
@@ -7128,62 +8432,61 @@ static const unsigned char pr2six[256] =
 
 int Base64decode_len(const char *bufcoded)
 {
-    int nbytesdecoded;
-    register const unsigned char *bufin;
-    register int nprbytes;
+	int nbytesdecoded;
+	register const unsigned char *bufin;
+	register int nprbytes;
 
-    bufin = (const unsigned char *) bufcoded;
-    while (pr2six[*(bufin++)] <= 63);
+	bufin = (const unsigned char *)bufcoded;
+	while (pr2six[*(bufin++)] <= 63);
 
-    nprbytes = (bufin - (const unsigned char *) bufcoded) - 1;
-    nbytesdecoded = ((nprbytes + 3) / 4) * 3;
+	nprbytes = (bufin - (const unsigned char *)bufcoded) - 1;
+	nbytesdecoded = ((nprbytes + 3) / 4) * 3;
 
-    return nbytesdecoded + 1;
+	return nbytesdecoded;
 }
 
 int Base64decode(char *bufplain, const char *bufcoded)
 {
-    int nbytesdecoded;
-    register const unsigned char *bufin;
-    register unsigned char *bufout;
-    register int nprbytes;
+	int nbytesdecoded;
+	register const unsigned char *bufin;
+	register unsigned char *bufout;
+	register int nprbytes;
 
-    bufin = (const unsigned char *) bufcoded;
-    while (pr2six[*(bufin++)] <= 63);
-    nprbytes = (bufin - (const unsigned char *) bufcoded) - 1;
-    nbytesdecoded = ((nprbytes + 3) / 4) * 3;
+	bufin = (const unsigned char *)bufcoded;
+	while (pr2six[*(bufin++)] <= 63);
+	nprbytes = (bufin - (const unsigned char *)bufcoded) - 1;
+	nbytesdecoded = ((nprbytes + 3) / 4) * 3;
 
-    bufout = (unsigned char *) bufplain;
-    bufin = (const unsigned char *) bufcoded;
+	bufout = (unsigned char *)bufplain;
+	bufin = (const unsigned char *)bufcoded;
 
-    while (nprbytes > 4) {
-    *(bufout++) =
-        (unsigned char) (pr2six[*bufin] << 2 | pr2six[bufin[1]] >> 4);
-    *(bufout++) =
-        (unsigned char) (pr2six[bufin[1]] << 4 | pr2six[bufin[2]] >> 2);
-    *(bufout++) =
-        (unsigned char) (pr2six[bufin[2]] << 6 | pr2six[bufin[3]]);
-    bufin += 4;
-    nprbytes -= 4;
-    }
+	while (nprbytes > 4) {
+		*(bufout++) =
+			(unsigned char)(pr2six[*bufin] << 2 | pr2six[bufin[1]] >> 4);
+		*(bufout++) =
+			(unsigned char)(pr2six[bufin[1]] << 4 | pr2six[bufin[2]] >> 2);
+		*(bufout++) =
+			(unsigned char)(pr2six[bufin[2]] << 6 | pr2six[bufin[3]]);
+		bufin += 4;
+		nprbytes -= 4;
+	}
 
-    /* Note: (nprbytes == 1) would be an error, so just ingore that case */
-    if (nprbytes > 1) {
-    *(bufout++) =
-        (unsigned char) (pr2six[*bufin] << 2 | pr2six[bufin[1]] >> 4);
-    }
-    if (nprbytes > 2) {
-    *(bufout++) =
-        (unsigned char) (pr2six[bufin[1]] << 4 | pr2six[bufin[2]] >> 2);
-    }
-    if (nprbytes > 3) {
-    *(bufout++) =
-        (unsigned char) (pr2six[bufin[2]] << 6 | pr2six[bufin[3]]);
-    }
+	/* Note: (nprbytes == 1) would be an error, so just ingore that case */
+	if (nprbytes > 1) {
+		*(bufout++) =
+			(unsigned char)(pr2six[*bufin] << 2 | pr2six[bufin[1]] >> 4);
+	}
+	if (nprbytes > 2) {
+		*(bufout++) =
+			(unsigned char)(pr2six[bufin[1]] << 4 | pr2six[bufin[2]] >> 2);
+	}
+	if (nprbytes > 3) {
+		*(bufout++) =
+			(unsigned char)(pr2six[bufin[2]] << 6 | pr2six[bufin[3]]);
+	}
 
-    *(bufout++) = '\0';
-    nbytesdecoded -= (4 - nprbytes) & 3;
-    return nbytesdecoded;
+	nbytesdecoded -= (4 - nprbytes) & 3;
+	return nbytesdecoded;
 }
 
 static const char basis_64[] =
@@ -7576,7 +8879,7 @@ char *stpcpy(char *dest, const char *src)
 /* --------------------------------------------------------------------------
    Windows port of stpncpy
 -------------------------------------------------------------------------- */
-char *stpncpy(char *dest, const char *src, unsigned int len)
+char *stpncpy(char *dest, const char *src, size_t len)
 {
     register char *d=dest;
     register const char *s=src;

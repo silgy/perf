@@ -10,47 +10,64 @@
 #define SILGY_LIB_H
 
 
-#define ALWAYS(str, ...)        log_write(LOG_ALWAYS, str, ##__VA_ARGS__)
-#define ERR(str, ...)           log_write(LOG_ERR, str, ##__VA_ARGS__)
-#define WAR(str, ...)           log_write(LOG_WAR, str, ##__VA_ARGS__)
-#define INF(str, ...)           log_write(LOG_INF, str, ##__VA_ARGS__)
-#define DBG(str, ...)           log_write(LOG_DBG, str, ##__VA_ARGS__)
+#define ALWAYS(str, ...)            log_write(LOG_ALWAYS, str, ##__VA_ARGS__)
+#define ERR(str, ...)               log_write(LOG_ERR, str, ##__VA_ARGS__)
+#define WAR(str, ...)               log_write(LOG_WAR, str, ##__VA_ARGS__)
+#define INF(str, ...)               log_write(LOG_INF, str, ##__VA_ARGS__)
+#define DBG(str, ...)               log_write(LOG_DBG, str, ##__VA_ARGS__)
 
-#define ALWAYS_T(str, ...)      log_write_time(LOG_ALWAYS, str, ##__VA_ARGS__)
-#define ERR_T(str, ...)         log_write_time(LOG_ERR, str, ##__VA_ARGS__)
-#define WAR_T(str, ...)         log_write_time(LOG_WAR, str, ##__VA_ARGS__)
-#define INF_T(str, ...)         log_write_time(LOG_INF, str, ##__VA_ARGS__)
-#define DBG_T(str, ...)         log_write_time(LOG_DBG, str, ##__VA_ARGS__)
+#define ALWAYS_T(str, ...)          log_write_time(LOG_ALWAYS, str, ##__VA_ARGS__)
+#define ERR_T(str, ...)             log_write_time(LOG_ERR, str, ##__VA_ARGS__)
+#define WAR_T(str, ...)             log_write_time(LOG_WAR, str, ##__VA_ARGS__)
+#define INF_T(str, ...)             log_write_time(LOG_INF, str, ##__VA_ARGS__)
+#define DBG_T(str, ...)             log_write_time(LOG_DBG, str, ##__VA_ARGS__)
 
-#define LOG_LINE                "--------------------------------------------------"
-#define LOG_LINE_N              "--------------------------------------------------\n"
-#define LOG_LINE_NN             "--------------------------------------------------\n\n"
-#define ALWAYS_LINE             ALWAYS(LOG_LINE)
-#define INF_LINE                INF(LOG_LINE)
-#define DBG_LINE                DBG(LOG_LINE)
+#define LOG_LINE                    "--------------------------------------------------"
+#define LOG_LINE_N                  "--------------------------------------------------\n"
+#define LOG_LINE_NN                 "--------------------------------------------------\n\n"
+#define ALWAYS_LINE                 ALWAYS(LOG_LINE)
+#define INF_LINE                    INF(LOG_LINE)
+#define DBG_LINE                    DBG(LOG_LINE)
 
-#define LOG_LINE_LONG           "--------------------------------------------------------------------------------------------------"
-#define LOG_LINE_LONG_N         "--------------------------------------------------------------------------------------------------\n"
-#define LOG_LINE_LONG_NN        "--------------------------------------------------------------------------------------------------\n\n"
-#define ALWAYS_LINE_LONG        ALWAYS(LOG_LINE_LONG)
-#define INF_LINE_LONG           INF(LOG_LINE_LONG)
-#define DBG_LINE_LONG           DBG(LOG_LINE_LONG)
+#define LOG_LINE_LONG               "--------------------------------------------------------------------------------------------------"
+#define LOG_LINE_LONG_N             "--------------------------------------------------------------------------------------------------\n"
+#define LOG_LINE_LONG_NN            "--------------------------------------------------------------------------------------------------\n\n"
+#define ALWAYS_LINE_LONG            ALWAYS(LOG_LINE_LONG)
+#define INF_LINE_LONG               INF(LOG_LINE_LONG)
+#define DBG_LINE_LONG               DBG(LOG_LINE_LONG)
 
-#define LOREM_IPSUM             "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."
+#define LOREM_IPSUM                 "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."
 
-#define PARAM(param)            (0==strcmp(label, param))
+#define PARAM(param)                (0==strcmp(label, param))
+
+#define UTF8_ANY(c)                 (((unsigned char)c & 0x80) == 0x80)
+#define UTF8_START(c)               (UTF8_ANY(c) && ((unsigned char)c & 0x40) == 0x40)
+
+#define COPY(dst, src, dst_len)     silgy_safe_copy(dst, src, dst_len)
 
 
 /* Query String Value */
 
-typedef char                    QSVAL[QSBUF];
-//typedef struct QSVAL          { char x[QSBUF]; } QSVAL;
+typedef char                        QSVAL[QSBUF];
+//typedef struct QSVAL              { char x[QSBUF]; } QSVAL;
+
+typedef char                        QSVAL1K[1024];
+typedef char                        QSVAL2K[2048];
+typedef char                        QSVAL4K[4096];
+typedef char                        QSVAL8K[8192];
+typedef char                        QSVAL16K[16384];
+typedef char                        QSVAL32K[32768];
+typedef char                        QSVAL64K[65536];
+typedef char                        QSVAL_TEXT[65536];
+
+
+#define RES_HEADER(key, val)        lib_res_header(ci, key, val)
 
 
 #ifdef APP_EMAIL_FROM_USER
-#define EMAIL_FROM_USER         APP_EMAIL_FROM_USER
+#define EMAIL_FROM_USER             APP_EMAIL_FROM_USER
 #else
-#define EMAIL_FROM_USER         "noreply"
+#define EMAIL_FROM_USER             "noreply"
 #endif
 
 
@@ -60,7 +77,99 @@ typedef char                    QSVAL[QSBUF];
 #define SHUTDOWN    3
 
 
-#define MAX_SHM_SEGMENTS                            100
+#define MAX_SHM_SEGMENTS            100
+
+
+/* API authorization system */
+
+#define AUTH_NONE                   0x00
+#define AUTH_CREATE                 0x01
+#define AUTH_READ                   0x02
+#define AUTH_UPDATE                 0x04
+#define AUTH_DELETE                 0x08
+#define AUTH_FULL                   0xFF
+
+#define IS_AUTH_CREATE(flags)       ((flags & AUTH_CREATE) == AUTH_CREATE)
+#define IS_AUTH_READ(flags)         ((flags & AUTH_READ) == AUTH_READ)
+#define IS_AUTH_UPDATE(flags)       ((flags & AUTH_UPDATE) == AUTH_UPDATE)
+#define IS_AUTH_DELETE(flags)       ((flags & AUTH_DELETE) == AUTH_DELETE)
+
+
+
+/* languages */
+
+#ifndef MAX_LANGUAGES
+#define MAX_LANGUAGES               250
+#endif
+
+typedef struct {
+    char lang[LANG_LEN+1];
+    int  first_index;
+    int  next_lang_index;
+} lang_t;
+
+
+
+/* messages */
+
+#ifndef MAX_MSG_LEN
+#define MAX_MSG_LEN                 255
+#endif
+
+#ifndef MAX_MESSAGES
+#define MAX_MESSAGES                1000
+#endif
+
+typedef struct {
+    int  code;
+    char lang[LANG_LEN+1];
+    char message[MAX_MSG_LEN+1];
+} message_t;
+
+
+#define silgy_message(code)         lib_get_message(ci, code)
+#define MSG(code)                   lib_get_message(ci, code)
+#define MSG_CAT_GREEN(code)         silgy_is_msg_main_cat(code, MSG_CAT_MESSAGE)
+#define MSG_CAT_ORANGE(code)        silgy_is_msg_main_cat(code, MSG_CAT_WARNING)
+#define MSG_CAT_RED(code)           silgy_is_msg_main_cat(code, MSG_CAT_ERROR)
+
+#define OUT_MSG_DESCRIPTION(code)   lib_send_msg_description(ci, code)
+
+#define OUT_HTML_HEADER             lib_out_html_header(ci)
+#define OUT_HTML_FOOTER             lib_out_html_footer(ci)
+#define OUT_SNIPPET(name)           lib_out_snippet(ci, name)
+
+
+/* strings */
+
+#ifndef STRINGS_SEP
+#define STRINGS_SEP                 '|'
+#endif
+
+#ifndef STRINGS_LANG
+#define STRINGS_LANG                "EN-US"
+#endif
+
+#ifndef MAX_STR_LEN
+#define MAX_STR_LEN                 255
+#endif
+
+#ifndef MAX_STRINGS
+#define MAX_STRINGS                 1000
+#endif
+
+typedef struct {
+    char lang[LANG_LEN+1];
+    char string_upper[MAX_STR_LEN+1];
+    char string_in_lang[MAX_STR_LEN+1];
+} string_t;
+
+
+
+/* format amount */
+
+#define AMT(val)                    silgy_amt(val)
+
 
 
 /* REST calls */
@@ -94,7 +203,7 @@ typedef struct {
 #define CALL_REST(req, res, method, url)            CALL_REST_JSON(req, res, method, url, TRUE)
 
 
-#define CALL_REST_DEFAULT_TIMEOUT                   1000     /* in ms -- to avoid blocking forever */
+#define CALL_REST_DEFAULT_TIMEOUT                   10000     /* in ms -- to avoid blocking forever */
 
 #define REST_RES_HEADER_LEN                         4095
 #define REST_ADDRESSES_CACHE_SIZE                   100
@@ -117,8 +226,12 @@ typedef struct {
 #define JSON_RECORD             4
 #define JSON_ARRAY              5
 
+#ifndef JSON_KEY_LEN
 #define JSON_KEY_LEN            31
+#endif
+#ifndef JSON_VAL_LEN
 #define JSON_VAL_LEN            255
+#endif
 
 #ifdef APP_JSON_MAX_ELEMS       /* in one JSON struct */
 #define JSON_MAX_ELEMS          APP_JSON_MAX_ELEMS
@@ -191,6 +304,7 @@ typedef json_t JSON;
 #define JSON_ADD_ARRAY(json, name, val)     lib_json_add_record(json, name, val, TRUE, -1)
 #define JSON_ADD_ARRAY_A(json, i, val)      lib_json_add_record(json, NULL, val, TRUE, i)
 
+#define JSON_PRESENT(json, name)            lib_json_present(json, name)
 
 #define JSON_GET_STR(json, name)            lib_json_get_str(json, name, -1)
 #define JSON_GET_STR_A(json, i)             lib_json_get_str(json, NULL, i)
@@ -236,6 +350,7 @@ typedef json_t JSON;
 #define JSON_ADD_ARRAY(json, name, val)     lib_json_add_record(&json, name, &val, TRUE, -1)
 #define JSON_ADD_ARRAY_A(json, i, val)      lib_json_add_record(&json, NULL, &val, TRUE, i)
 
+#define JSON_PRESENT(json, name)            lib_json_present(&json, name)
 
 #define JSON_GET_STR(json, name)            lib_json_get_str(&json, name, -1)
 #define JSON_GET_STR_A(json, i)             lib_json_get_str(&json, NULL, i)
@@ -265,33 +380,50 @@ typedef json_t JSON;
 #define silgy_read_param(param, val)        silgy_read_param_str(param, val)
 
 
+#define AI_USERS_ALL                        0       /* all users */
+#define AI_USERS_YAU                        1       /* yearly active */
+#define AI_USERS_MAU                        2       /* monthly active */
+#define AI_USERS_DAU                        3       /* daily active */
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif
     void silgy_lib_init(void);
     void silgy_lib_done(void);
+    void silgy_safe_copy(char *dst, const char *src, size_t dst_len);
+    char *silgy_render_md(char *dest, const char *src);
+    char *silgy_json_enc(const char *src);
+    bool lib_csrft_ok(int ci);
     void silgy_add_message(int code, const char *lang, const char *message, ...);
-    char *silgy_message(int code);
-    char *silgy_message_lang(int ci, int code);
+    int  compare_messages(const void *a, const void *b);
+    void sort_messages(void);
+    char *lib_get_message(int ci, int code);
+    bool silgy_is_msg_main_cat(int code, const char *cat);
+    void silgy_add_string(const char *lang, const char *str, const char *str_lang);
+    const char *lib_get_string(int ci, const char *str);
     char *urlencode(const char *src);
     bool lib_open_db(void);
     void lib_close_db(void);
     bool lib_file_exists(const char *fname);
     void lib_get_exec_name(char *dst, const char *path);
     void lib_update_time_globals(void);
+    bool read_snippets(bool first_scan, const char *path);
+    void lib_out_snippet(int ci, const char *name);
     void lib_setnonblocking(int sock);
     void lib_out_html_header(int ci);
     void lib_out_html_footer(int ci);
     void lib_append_css(int ci, const char *fname, bool first);
     void lib_append_script(int ci, const char *fname, bool first);
-    bool get_qs_param_html_esc(int ci, const char *fieldname, char *retbuf);
-    bool get_qs_param_sql_esc(int ci, const char *fieldname, char *retbuf);
-    bool get_qs_param(int ci, const char *fieldname, char *retbuf);
+    char *uri_decode(char *src, int srclen, char *dest, int maxlen);
+    bool get_qs_param(int ci, const char *fieldname, char *retbuf, int maxlen, char esc_type);
     bool get_qs_param_raw(int ci, const char *fieldname, char *retbuf, int maxlen);
-    bool get_qs_param_long(int ci, const char *fieldname, char *retbuf);
-    bool get_qs_param_multipart_txt(int ci, const char *fieldname, char *retbuf);
     char *get_qs_param_multipart(int ci, const char *fieldname, unsigned *retlen, char *retfname);
+    bool lib_qsi(int ci, const char *fieldname, int *retbuf);
+    bool lib_qsf(int ci, const char *fieldname, float *retbuf);
+    bool lib_qsd(int ci, const char *fieldname, double *retbuf);
     void lib_set_res_status(int ci, int status);
+    void lib_res_header(int ci, const char *hdr, const char *val);
     void lib_set_res_content_type(int ci, const char *str);
     void lib_set_res_location(int ci, const char *str, ...);
     void lib_set_res_content_disposition(int ci, const char *str, ...);
@@ -310,6 +442,7 @@ extern "C" {
     char *silgy_filter_strict(const char *src);
     char *lib_add_spaces(const char *src, int len);
     char *lib_add_lspaces(const char *src, int len);
+    char *get_file_ext(const char *fname);
     char get_res_type(const char *fname);
     void date_str2rec(const char *str, date_t *rec);
     void date_rec2str(char *str, date_t *rec);
@@ -317,6 +450,7 @@ extern "C" {
     time_t time_db2epoch(const char *str);
     char *time_epoch2http(time_t epoch);
     void lib_set_datetime_formats(const char *lang);
+    char *silgy_amt(double val);
     void amt(char *stramt, long long in_amt);
     void amtd(char *stramt, double in_amt);
     void lib_amt(char *stramt, long in_amt);
@@ -329,7 +463,8 @@ extern "C" {
     char *san_long(const char *str);
     char *silgy_sql_esc(const char *str);
     char *silgy_html_esc(const char *str);
-    void sanitize_sql(char *dest, const char *str, int len);
+    void sanitize_sql(char *dst, const char *str, int len);
+    void sanitize_html(char *dst, const char *str, int len);
     char *silgy_html_unesc(const char *str);
     char *uri_encode(const char *str);
     char *upper(const char *str);
@@ -343,11 +478,12 @@ extern "C" {
     char *lib_json_to_string(JSON *json);
     char *lib_json_to_string_pretty(JSON *json);
     bool lib_json_from_string(JSON *json, const char *src, int len, int level);
-    bool lib_json_add(JSON *json, const char *name, const char *str_value, long int_value, double flo_value, char type, int i);
+    bool lib_json_add(JSON *json, const char *name, const char *str_value, int int_value, double flo_value, char type, int i);
     bool lib_json_add_record(JSON *json, const char *name, JSON *json_sub, bool is_array, int i);
-    bool lib_json_get(JSON *json, const char *name, char *str_value, long *num_value, char type);
+    bool lib_json_get(JSON *json, const char *name, char *str_value, int *num_value, char type);
+    bool lib_json_present(JSON *json, const char *name);
     char *lib_json_get_str(JSON *json, const char *name, int i);
-    long lib_json_get_int(JSON *json, const char *name, int i);
+    int  lib_json_get_int(JSON *json, const char *name, int i);
     double lib_json_get_float(JSON *json, const char *name, int i);
     bool lib_json_get_bool(JSON *json, const char *name, int i);
     bool lib_json_get_record(JSON *json, const char *name, JSON *json_sub, int i);
@@ -356,6 +492,7 @@ extern "C" {
     void get_byteorder(void);
     time_t db2epoch(const char *str);
     bool silgy_email(const char *to, const char *subject, const char *message);
+    bool silgy_email_attach(const char *to, const char *subject, const char *message, const char *att_name, const char *att_data, int att_data_len);
     int  silgy_minify(char *dest, const char *src);
     void date_inc(char *str, int days, int *dow);
     int  date_cmp(const char *str1, const char *str2);
@@ -368,11 +505,11 @@ extern "C" {
     bool log_start(const char *prefix, bool test);
     void log_write_time(int level, const char *message, ...);
     void log_write(int level, const char *message, ...);
-    void log_long(const char *str, long len, const char *desc);
+    void log_long(const char *str, int len, const char *desc);
     void log_flush(void);
     void log_finish(void);
 #ifdef ICONV
-    char *silgy_convert(char *src, const char *cp_from, const char *cp_to);
+    char *silgy_convert(const char *src, const char *cp_from, const char *cp_to);
 #endif
 
     char *md5(const char* str);
@@ -386,7 +523,7 @@ extern "C" {
     int getpid(void);
     int clock_gettime_win(struct timespec *spec);
     char *stpcpy(char *dest, const char *src);
-    char *stpncpy(char *dest, const char *src, unsigned int len);
+    char *stpncpy(char *dest, const char *src, size_t len);
 #endif  /* _WIN32 */
 
 #ifndef strnstr

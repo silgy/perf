@@ -44,7 +44,7 @@ char        G_whiteList[256]="";
 int         G_ASYNCId=0;
 int         G_ASYNCDefTimeout=ASYNC_DEF_TIMEOUT;
 /* end of config params */
-unsigned    G_days_up=0;                /* web server's days up */
+int         G_days_up=0;                /* web server's days up */
 conn_t      conn[MAX_CONNECTIONS+1]={0}; /* HTTP connections & requests -- by far the most important structure around */
 int         G_open_conn=0;              /* number of open connections */
 int         G_open_conn_hwm=0;          /* highest number of open connections (high water mark) */
@@ -53,6 +53,7 @@ ausession_t auses[MAX_SESSIONS+1]={0};  /* app user sessions, using the same ind
 int         G_sessions=0;               /* number of active user sessions */
 int         G_sessions_hwm=0;           /* highest number of active user sessions (high water mark) */
 char        G_last_modified[32]="";     /* response header field with server's start time */
+bool        G_initialized=0;
 
 #ifdef DBMYSQL
 MYSQL       *G_dbconn=NULL;             /* database connection */
@@ -109,11 +110,26 @@ http_status_t   M_http_status[]={
 /* authorization levels */
 
 static struct {
-    char    resource[MAX_RESOURCE_LEN+1];
-    short   level;
+    char path[256];
+    char level;
     } M_auth_levels[MAX_RESOURCES] = {
         {"-", EOS}
     };
+
+
+/* hosts */
+
+static struct {
+    char host[256];
+    char res[256];
+    char resmin[256];
+    bool index_present;
+    } M_hosts[MAX_HOSTS] = {
+        {"", "res", "resmin", FALSE}
+    };
+
+static int      M_hosts_cnt=1;              /* main host always present */
+
 
 static char     *M_pidfile;                 /* pid file name */
 
@@ -154,9 +170,10 @@ static char         M_resp_date[32];            /* response header Date */
 static char         M_expires_stat[32];         /* response header for static resources */
 static char         M_expires_gen[32];          /* response header for generated resources */
 static int          M_max_static=-1;            /* highest static resource M_stat index */
-static bool         M_favicon_exists=FALSE;     /* special case statics */
-static bool         M_robots_exists=FALSE;      /* -''- */
-static bool         M_appleicon_exists=FALSE;   /* -''- */
+static bool         M_popular_favicon=FALSE;    /* popular statics -- don't create sessions for those */
+static bool         M_popular_appleicon=FALSE;  /* -''- */
+static bool         M_popular_robots=FALSE;     /* -''- */
+static bool         M_popular_sw=FALSE;         /* -''- */
 
 #ifdef _WIN32   /* Windows */
 WSADATA             wsa;
@@ -193,8 +210,8 @@ static bool ip_blocked(const char *addr);
 static void read_allowed_ips(void);
 static bool ip_allowed(const char *addr);
 static int  first_free_stat(void);
-static bool read_files(bool minify, bool first_scan, const char *path);
-static int  is_static_res(int ci, const char *name);
+static bool read_resources(bool first_scan);
+static int  is_static_res(int ci);
 static void process_req(int ci);
 static unsigned deflate_data(unsigned char *dest, const unsigned char *src, unsigned src_len);
 static void gen_response_header(int ci);
@@ -365,8 +382,6 @@ int main(int argc, char **argv)
     }
 
 #endif  /* HTTPS */
-
-//    addr_len = sizeof(cli_addr);
 
     /* log currently used memory */
 
@@ -716,12 +731,12 @@ int main(int argc, char **argv)
                     if ( conn[i].conn_state == CONN_STATE_READY_FOR_PARSE )
                     {
                         conn[i].status = parse_req(i, bytes);
-#ifdef HTTPS
-#ifdef DOMAINONLY       /* redirect to final domain first */
-                        if ( !conn[i].secure && conn[i].upgrade2https && 0!=strcmp(conn[i].host, APP_DOMAIN) )
-                            conn[i].upgrade2https = FALSE;
-#endif
-#endif  /* HTTPS */
+//#ifdef HTTPS
+//#ifdef DOMAINONLY       /* redirect to final domain first */
+//                        if ( !conn[i].secure && conn[i].upgrade2https && 0!=strcmp(conn[i].host, APP_DOMAIN) )
+//                            conn[i].upgrade2https = FALSE;
+//#endif
+//#endif  /* HTTPS */
                         if ( conn[i].conn_state != CONN_STATE_READING_DATA )
                         {
 #ifdef DUMP
@@ -745,10 +760,10 @@ int main(int argc, char **argv)
 #else
                         clock_gettime(MONOTONIC_CLOCK_NAME, &conn[i].proc_start);
 #endif
-#ifdef HTTPS
-                        if ( conn[i].upgrade2https && conn[i].status==200 )
-                            conn[i].status = 301;
-#endif
+//#ifdef HTTPS
+//                        if ( conn[i].upgrade2https && conn[i].status==200 )
+//                            conn[i].status = 301;
+//#endif
                         /* update visits counter */
                         if ( !conn[i].resource[0] && conn[i].status==200 && !conn[i].bot && !conn[i].head_only && 0==strcmp(conn[i].host, APP_DOMAIN) )
                         {
@@ -759,7 +774,7 @@ int main(int argc, char **argv)
                                 ++G_cnts_today.visits_dsk;
                         }
 
-                        if ( conn[i].static_res == NOT_STATIC )   /* process request */
+                        if ( !conn[i].location[0] && conn[i].static_res == NOT_STATIC )   /* process request */
                             process_req(i);
 #ifdef ASYNC
                         if ( conn[i].conn_state != CONN_STATE_WAITING_FOR_ASYNC )
@@ -856,6 +871,7 @@ int main(int argc, char **argv)
 
                 /* update connection details */
 
+                strcpy(conn[res.ci].cust_headers, res.hdr.cust_headers);
                 conn[res.ci].ctype = res.hdr.ctype;
                 strcpy(conn[res.ci].ctypestr, res.hdr.ctypestr);
                 strcpy(conn[res.ci].cdisp, res.hdr.cdisp);
@@ -1003,8 +1019,7 @@ static bool housekeeping()
 #ifndef DONT_RESCAN_RES
     if ( G_test )   /* kind of developer mode */
     {
-        read_files(FALSE, FALSE, NULL);
-        read_files(TRUE, FALSE, NULL);
+        read_resources(FALSE);
     }
 #endif  /* DONT_RESCAN_RES */
 #endif  /* DUMP */
@@ -1024,9 +1039,8 @@ static bool housekeeping()
         log_flush();
 
 #ifndef DONT_RESCAN_RES    /* refresh static resources */
-        read_files(FALSE, FALSE, NULL);
-        read_files(TRUE, FALSE, NULL);
-#endif  /* DONT_RESCAN_RES */
+        read_resources(FALSE);
+#endif
 
         /* start new log file every day */
 
@@ -1523,10 +1537,6 @@ static bool init(int argc, char **argv)
 
     silgy_lib_init();
 
-#ifdef USERS
-    libusr_init();
-#endif
-
     /* read the config file or set defaults */
 
     read_conf();
@@ -1612,24 +1622,20 @@ static bool init(int argc, char **argv)
     ALWAYS("    WEB_SERVER_VERSION = %s", WEB_SERVER_VERSION);
 #ifdef MEM_TINY
     ALWAYS("          Memory model = MEM_TINY");
-#endif
-#ifdef MEM_SMALL
-    ALWAYS("          Memory model = MEM_SMALL");
-#endif
-#ifdef MEM_MEDIUM
+#elif defined MEM_MEDIUM
     ALWAYS("          Memory model = MEM_MEDIUM");
-#endif
-#ifdef MEM_LARGE
+#elif defined MEM_LARGE
     ALWAYS("          Memory model = MEM_LARGE");
-#endif
-#ifdef MEM_XLARGE
+#elif defined MEM_XLARGE
     ALWAYS("          Memory model = MEM_XLARGE");
-#endif
-#ifdef MEM_XXLARGE
+#elif defined MEM_XXLARGE
     ALWAYS("          Memory model = MEM_XXLARGE");
-#endif
-#ifdef MEM_XXXLARGE
+#elif defined MEM_XXXLARGE
     ALWAYS("          Memory model = MEM_XXXLARGE");
+#elif defined MEM_XXXXLARGE
+    ALWAYS("          Memory model = MEM_XXXXLARGE");
+#else   /* MEM_SMALL -- default */
+    ALWAYS("          Memory model = MEM_SMALL");
 #endif
     ALWAYS("       MAX_CONNECTIONS = %d", MAX_CONNECTIONS);
     ALWAYS("          MAX_SESSIONS = %d", MAX_SESSIONS);
@@ -1709,6 +1715,17 @@ static bool init(int argc, char **argv)
         ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_ADMIN");
     else if ( DEF_RES_AUTH_LEVEL == AUTH_LEVEL_ROOT )
         ALWAYS("    DEF_RES_AUTH_LEVEL = AUTH_LEVEL_ROOT");
+
+    ALWAYS("             SESID_LEN = %d", SESID_LEN);
+    ALWAYS("          MAX_MESSAGES = %d", MAX_MESSAGES);
+    ALWAYS("           MAX_STRINGS = %d", MAX_STRINGS);
+    ALWAYS("       EXPIRES_STATICS = %d days", EXPIRES_STATICS);
+    ALWAYS("     EXPIRES_GENERATED = %d days", EXPIRES_GENERATED);
+#ifndef _WIN32
+    ALWAYS("     COMPRESS_TRESHOLD = %d bytes", COMPRESS_TRESHOLD);
+    ALWAYS("        COMPRESS_LEVEL = %d", COMPRESS_LEVEL);
+#endif
+
 #ifdef APP_ADMIN_EMAIL
     ALWAYS("       APP_ADMIN_EMAIL = %s", APP_ADMIN_EMAIL);
 #endif
@@ -1734,6 +1751,11 @@ static bool init(int argc, char **argv)
     ALWAYS("");
 #endif  /* DUMP */
 
+    /* USERS library init */
+
+#ifdef USERS
+    libusr_init();
+#endif
 
     /* ensure the message sizes are sufficient */
 
@@ -1780,52 +1802,14 @@ static bool init(int argc, char **argv)
 
     /* read static resources */
 
-    if ( !read_files(FALSE, TRUE, NULL) )   /* normal */
+    if ( !read_resources(TRUE) )
     {
-        ERR("read_files() failed");
+        ERR("read_resources() failed");
         return FALSE;
     }
 
-    DBG("read_files(FALSE) OK");
+    DBG("read_resources() OK");
 
-    if ( !read_files(TRUE, TRUE, NULL) )    /* minified */
-    {
-        ERR("read_files() for minified failed");
-        return FALSE;
-    }
-
-    DBG("read_files(TRUE) OK");
-
-    /* special case statics -- check if present */
-
-    for ( i=0; M_stat[i].name[0] != '-'; ++i )
-    {
-        if ( 0==strcmp(M_stat[i].name, "favicon.ico") )
-        {
-            M_favicon_exists = TRUE;
-            break;
-        }
-    }
-
-    for ( i=0; M_stat[i].name[0] != '-'; ++i )
-    {
-        if ( 0==strcmp(M_stat[i].name, "robots.txt") )
-        {
-            M_robots_exists = TRUE;
-            break;
-        }
-    }
-
-    for ( i=0; M_stat[i].name[0] != '-'; ++i )
-    {
-        if ( 0==strcmp(M_stat[i].name, "apple-touch-icon.png") )
-        {
-            M_appleicon_exists = TRUE;
-            break;
-        }
-    }
-
-    DBG("Standard icons OK");
 
     /* libSHA1 test */
 
@@ -1977,7 +1961,7 @@ static bool init(int argc, char **argv)
 
     /* ------------------------------------------------------------------- */
 
-    for (i=0; i<MAX_ASYNC_REQS; ++i)
+    for ( i=0; i<MAX_ASYNC_REQS; ++i )
         areqs[i].state = ASYNC_STATE_FREE;
 
     M_last_call_id = 0;
@@ -1985,6 +1969,10 @@ static bool init(int argc, char **argv)
     INF("");
 
 #endif  /* ASYNC */
+
+    sort_messages();
+
+    G_initialized = 1;
 
     return TRUE;
 }
@@ -2352,11 +2340,11 @@ static void read_blocked_ips()
 {
     char    fname[1024];
     FILE    *h_file=NULL;
-    int     c=0;
+    char    c;
     int     i=0;
     char    now_value=1;
     char    now_comment=0;
-    char    value[64]="";
+    char    value[INET_ADDRSTRLEN];
 
     if ( G_blockedIPList[0] == EOS ) return;
 
@@ -2390,6 +2378,7 @@ static void read_blocked_ips()
             if ( now_value && i )   /* end of value */
             {
                 value[i] = EOS;
+                i = 0;
                 if ( !ip_blocked(value) )   /* avoid duplicates */
                 {
                     strcpy(G_blacklist[G_blacklist_cnt++], value);
@@ -2400,7 +2389,6 @@ static void read_blocked_ips()
                         break;
                     }
                 }
-                i = 0;
             }
             now_value = 1;
             now_comment = 0;
@@ -2414,6 +2402,7 @@ static void read_blocked_ips()
             if ( now_value && i )   /* end of value */
             {
                 value[i] = EOS;
+                i = 0;
                 strcpy(G_blacklist[G_blacklist_cnt++], value);
                 if ( G_blacklist_cnt == MAX_BLACKLIST )
                 {
@@ -2421,7 +2410,6 @@ static void read_blocked_ips()
                     now_value = 0;
                     break;
                 }
-                i = 0;
             }
             now_value = 0;
             now_comment = 1;
@@ -2593,8 +2581,9 @@ static bool ip_allowed(const char *addr)
    Read all the files from G_appdir/res or resmin directory
    path is a relative path uder `res` or `resmin`
 -------------------------------------------------------------------------- */
-static bool read_files(bool minify, bool first_scan, const char *path)
+static bool read_files(const char *host, const char *directory, char source, bool first_scan, const char *path)
 {
+    bool    minify=FALSE;
     int     i;
     char    resdir[STATIC_PATH_LEN];        /* full path to res */
     char    ressubdir[STATIC_PATH_LEN];     /* full path to res/subdir */
@@ -2615,41 +2604,36 @@ static bool read_files(bool minify, bool first_scan, const char *path)
     if ( first_scan && !path ) DBG("");
 
 #ifdef DUMP
-//    DBG_LINE_LONG;
-//    DBG("read_files, minify = %s", minify?"TRUE":"FALSE");
+    if ( first_scan )
+    {
+        if ( !path ) DBG_LINE_LONG;
+        DBG("read_files, directory [%s]", directory);
+    }
 #endif
 
 #ifdef _WIN32   /* be more forgiving */
 
     if ( G_appdir[0] )
     {
-        if ( minify )
-            sprintf(resdir, "%s/resmin", G_appdir);
-        else
-            sprintf(resdir, "%s/res", G_appdir);
+        sprintf(resdir, "%s/%s", G_appdir, directory);
     }
     else    /* no SILGYDIR */
     {
-        if ( minify )
-            strcpy(resdir, "../resmin");
-        else
-            strcpy(resdir, "../res");
+        sprintf(resdir, "../%s", directory);
     }
 
-#else /* Linux -- don't fool around */
+#else   /* Linux -- don't fool around */
 
-    if ( minify )
-        sprintf(resdir, "%s/resmin", G_appdir);
-    else
-        sprintf(resdir, "%s/res", G_appdir);
+    sprintf(resdir, "%s/%s", G_appdir, directory);
 
 #endif  /* _WIN32 */
 
 #ifdef DUMP
-//    DBG("resdir [%s]", resdir);
+    if ( first_scan )
+        DBG("resdir [%s]", resdir);
 #endif
 
-    if ( !path )     /* highest level */
+    if ( !path )   /* highest level */
     {
         strcpy(ressubdir, resdir);
     }
@@ -2659,15 +2643,14 @@ static bool read_files(bool minify, bool first_scan, const char *path)
     }
 
 #ifdef DUMP
-//    DBG("ressubdir [%s]", ressubdir);
+    if ( first_scan )
+        DBG("ressubdir [%s]", ressubdir);
 #endif
 
     if ( (dir=opendir(ressubdir)) == NULL )
     {
-//#ifdef DUMP
         if ( first_scan )
             DBG("Couldn't open directory [%s]", ressubdir);
-//#endif
         return TRUE;    /* don't panic, just no external resources will be used */
     }
 
@@ -2681,11 +2664,9 @@ static bool read_files(bool minify, bool first_scan, const char *path)
 #endif
         for ( i=0; i<=M_max_static; ++i )
         {
-            if ( M_stat[i].name[0]==EOS ) continue;  /* already removed */
+            if ( M_stat[i].name[0]==EOS ) continue;   /* already removed */
 
-            if ( minify && M_stat[i].source != STATIC_SOURCE_RESMIN ) continue;
-
-            if ( !minify && M_stat[i].source != STATIC_SOURCE_RES ) continue;
+            if ( 0 != strcmp(M_stat[i].host, host) || M_stat[i].source != source ) continue;
 #ifdef DUMP
 //            DBG("Checking %s...", M_stat[i].name);
 #endif
@@ -2696,11 +2677,51 @@ static bool read_files(bool minify, bool first_scan, const char *path)
             {
                 INF("Removing %s from static resources", M_stat[i].name);
 
-                if ( 0==strcmp(M_stat[i].name, "index.html") )
-                    G_index_present = FALSE;
+                if ( 0==strcmp(directory, "res") )
+                {
+                    if ( 0==strcmp(M_stat[i].name, "index.html") )
+                        G_index_present = FALSE;
+                    else if ( 0==strcmp(M_stat[i].name, "favicon.ico") )
+                        M_popular_favicon = FALSE;
+                    else if ( 0==strcmp(M_stat[i].name, "apple-touch-icon.png") )
+                        M_popular_appleicon = FALSE;
+                    else if ( 0==strcmp(M_stat[i].name, "robots.txt") )
+                        M_popular_robots = FALSE;
+                }
+                else if ( 0==strcmp(directory, "resmin") )
+                {
+                    if ( 0==strcmp(M_stat[i].name, "sw.js") )
+                        M_popular_sw = FALSE;
+                }
+                else if ( 0!=strcmp(directory, "snippets") )   /* side gig */
+                {
+                    if ( 0==strcmp(M_stat[i].name, "index.html") )
+                    {
+                        int j;
+                        for ( j=1; j<M_hosts_cnt; ++j )
+                        {
+                            if ( 0==strcmp(M_hosts[j].host, host) )
+                            {
+                                M_hosts[j].index_present = FALSE;
+                                break;
+                            }
+                        }
+                    }
+                }
 
+                M_stat[i].host[0] = EOS;
                 M_stat[i].name[0] = EOS;
+
                 free(M_stat[i].data);
+                M_stat[i].data = NULL;
+                M_stat[i].len = 0;
+
+                if ( M_stat[i].data_deflated )
+                {
+                    free(M_stat[i].data_deflated);
+                    M_stat[i].data_deflated = NULL;
+                    M_stat[i].len_deflated = 0;
+                }
             }
         }
     }
@@ -2709,11 +2730,11 @@ static bool read_files(bool minify, bool first_scan, const char *path)
 #ifdef DUMP
 //    DBG("Reading %sfiles", first_scan?"":"new ");
 #endif
-    /* read the files into memory */
+    /* read files into memory */
 
     while ( (dirent=readdir(dir)) )
     {
-        if ( dirent->d_name[0] == '.' )  /* skip ".", ".." and hidden files */
+        if ( dirent->d_name[0] == '.' )   /* skip ".", ".." and hidden files */
             continue;
 
         /* ------------------------------------------------------------------- */
@@ -2725,8 +2746,8 @@ static bool read_files(bool minify, bool first_scan, const char *path)
             sprintf(resname, "%s/%s", path, dirent->d_name);
 
 #ifdef DUMP
-//        if ( first_scan )
-//            DBG("resname [%s]", resname);
+        if ( first_scan )
+            DBG("resname [%s]", resname);
 #endif
 
         /* ------------------------------------------------------------------- */
@@ -2735,8 +2756,8 @@ static bool read_files(bool minify, bool first_scan, const char *path)
         sprintf(namewpath, "%s/%s", resdir, resname);
 
 #ifdef DUMP
-//        if ( first_scan )
-//            DBG("namewpath [%s]", namewpath);
+        if ( first_scan )
+            DBG("namewpath [%s]", namewpath);
 #endif
 
         if ( stat(namewpath, &fstat) != 0 )
@@ -2751,10 +2772,10 @@ static bool read_files(bool minify, bool first_scan, const char *path)
         if ( S_ISDIR(fstat.st_mode) )   /* directory */
         {
 #ifdef DUMP
-//            if ( first_scan )
-//                DBG("Reading subdirectory [%s]...", dirent->d_name);
+            if ( first_scan )
+                DBG("Reading subdirectory [%s]...", dirent->d_name);
 #endif
-            read_files(minify, first_scan, resname);
+            read_files(host, directory, source, first_scan, resname);
             continue;
         }
         else if ( !S_ISREG(fstat.st_mode) )    /* skip if not a regular file nor directory */
@@ -2773,19 +2794,15 @@ static bool read_files(bool minify, bool first_scan, const char *path)
 
         if ( !first_scan )
         {
-            bool exists = FALSE;
+            bool exists_not_changed = FALSE;
 
             for ( i=0; i<=M_max_static; ++i )
             {
-                if ( M_stat[i].name[0]==EOS ) continue;  /* removed */
-
-                if ( minify && M_stat[i].source != STATIC_SOURCE_RESMIN ) continue;
-
-                if ( !minify && M_stat[i].source != STATIC_SOURCE_RES ) continue;
+                if ( M_stat[i].name[0]==EOS ) continue;   /* removed */
 
                 /* ------------------------------------------------------------------- */
 
-                if ( 0==strcmp(M_stat[i].name, resname) )
+                if ( 0==strcmp(M_stat[i].host, host) && 0==strcmp(M_stat[i].name, resname) && M_stat[i].source == source )
                 {
 #ifdef DUMP
 //                    DBG("%s already read", resname);
@@ -2795,7 +2812,7 @@ static bool read_files(bool minify, bool first_scan, const char *path)
 #ifdef DUMP
 //                        DBG("Not modified");
 #endif
-                        exists = TRUE;
+                        exists_not_changed = TRUE;
                     }
                     else
                     {
@@ -2807,7 +2824,7 @@ static bool read_files(bool minify, bool first_scan, const char *path)
                 }
             }
 
-            if ( exists ) continue;  /* not modified */
+            if ( exists_not_changed ) continue;   /* not modified */
         }
 
         /* find the first unused slot in M_stat array */
@@ -2815,9 +2832,22 @@ static bool read_files(bool minify, bool first_scan, const char *path)
         if ( !reread )
         {
             i = first_free_stat();
+
+            /* host -- already uppercase */
+
+            strcpy(M_stat[i].host, host);
+
             /* file name */
+
             strcpy(M_stat[i].name, resname);
         }
+
+        /* source */
+
+        M_stat[i].source = source;
+
+        if ( source == STATIC_SOURCE_RESMIN )
+            minify = TRUE;
 
         /* last modified */
 
@@ -2877,7 +2907,12 @@ static bool read_files(bool minify, bool first_scan, const char *path)
                 }
             }
 
-            if ( NULL == (M_stat[i].data=(char*)malloc(M_stat[i].len+1+OUT_HEADER_BUFSIZE)) )
+            if ( M_stat[i].source == STATIC_SOURCE_SNIPPET )
+                M_stat[i].data = (char*)malloc(M_stat[i].len+1);
+            else
+                M_stat[i].data = (char*)malloc(M_stat[i].len+1+OUT_HEADER_BUFSIZE);
+
+            if ( NULL == M_stat[i].data )
             {
                 ERR("Couldn't allocate %u bytes for %s", M_stat[i].len+1+OUT_HEADER_BUFSIZE, M_stat[i].name);
                 fclose(fd);
@@ -2892,32 +2927,62 @@ static bool read_files(bool minify, bool first_scan, const char *path)
                 free(data_tmp_min);
                 data_tmp = NULL;
                 data_tmp_min = NULL;
-
-                M_stat[i].source = STATIC_SOURCE_RESMIN;
             }
-            else
+            else if ( M_stat[i].source == STATIC_SOURCE_RES )
             {
                 fread(M_stat[i].data+OUT_HEADER_BUFSIZE, M_stat[i].len, 1, fd);
-                M_stat[i].source = STATIC_SOURCE_RES;
+            }
+            else    /* snippet */
+            {
+                fread(M_stat[i].data, M_stat[i].len, 1, fd);
             }
 
             fclose(fd);
 
             /* get the file type ------------------------------- */
 
-            if ( !reread )
+            if ( !reread && M_stat[i].source != STATIC_SOURCE_SNIPPET )
             {
                 M_stat[i].type = get_res_type(M_stat[i].name);
 
-                if ( 0==strcmp(M_stat[i].name, "index.html") )
-                    G_index_present = TRUE;
+                if ( 0==strcmp(directory, "res") )
+                {
+                    if ( 0==strcmp(M_stat[i].name, "index.html") )
+                        G_index_present = TRUE;
+                    else if ( 0==strcmp(M_stat[i].name, "favicon.ico") )
+                        M_popular_favicon = TRUE;
+                    else if ( 0==strcmp(M_stat[i].name, "apple-touch-icon.png") )
+                        M_popular_appleicon = TRUE;
+                    else if ( 0==strcmp(M_stat[i].name, "robots.txt") )
+                        M_popular_robots = TRUE;
+                }
+                else if ( 0==strcmp(directory, "resmin") )
+                {
+                    if ( 0==strcmp(M_stat[i].name, "sw.js") )
+                        M_popular_sw = TRUE;
+                }
+                else if ( 0!=strcmp(directory, "snippets") )   /* side gig */
+                {
+                    if ( 0==strcmp(M_stat[i].name, "index.html") )
+                    {
+                        int j;
+                        for ( j=1; j<M_hosts_cnt; ++j )
+                        {
+                            if ( 0==strcmp(M_hosts[j].host, host) )
+                            {
+                                M_hosts[j].index_present = TRUE;
+                                break;
+                            }
+                        }
+                    }
+                }
             }
 
             /* compress ---------------------------------------- */
 
 #ifndef _WIN32
 
-            if ( SHOULD_BE_COMPRESSED(M_stat[i].len, M_stat[i].type) )
+            if ( SHOULD_BE_COMPRESSED(M_stat[i].len, M_stat[i].type) && M_stat[i].source != STATIC_SOURCE_SNIPPET )
             {
                 if ( NULL == (data_tmp=(char*)malloc(M_stat[i].len)) )
                 {
@@ -2988,6 +3053,52 @@ static bool read_files(bool minify, bool first_scan, const char *path)
 
 
 /* --------------------------------------------------------------------------
+   Read all static resources from disk
+-------------------------------------------------------------------------- */
+static bool read_resources(bool first_scan)
+{
+    if ( !read_files("", "res", STATIC_SOURCE_RES, first_scan, NULL) )
+    {
+        ERR("reading res failed");
+        return FALSE;
+    }
+
+    if ( !read_files("", "resmin", STATIC_SOURCE_RESMIN, first_scan, NULL) )
+    {
+        ERR("reading resmin failed");
+        return FALSE;
+    }
+
+    if ( !read_snippets(first_scan, NULL) )
+    {
+        ERR("reading snippets failed");
+        return FALSE;
+    }
+
+    /* side gigs */
+
+    int i;
+
+    for ( i=1; i<M_hosts_cnt; ++i )
+    {
+        if ( !read_files(M_hosts[i].host, M_hosts[i].res, STATIC_SOURCE_RES, first_scan, NULL) )
+        {
+            ERR("reading %s's res failed", M_hosts[i].host);
+            return FALSE;
+        }
+
+        if ( !read_files(M_hosts[i].host, M_hosts[i].resmin, STATIC_SOURCE_RESMIN, first_scan, NULL) )
+        {
+            ERR("reading %s's resmin failed", M_hosts[i].host);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+
+/* --------------------------------------------------------------------------
    Find first free slot in M_stat
 -------------------------------------------------------------------------- */
 static int first_free_stat()
@@ -3012,21 +3123,38 @@ static int first_free_stat()
 /* --------------------------------------------------------------------------
    Return M_stat array index if name is on statics' list
 -------------------------------------------------------------------------- */
-static int is_static_res(int ci, const char *name)
+static int is_static_res(int ci)
 {
     int i;
 
-    for ( i=0; M_stat[i].name[0] != '-'; ++i )
+    if ( !conn[ci].host_id )    /* main host */
     {
-        if ( 0==strcmp(M_stat[i].name, name) )
+        for ( i=0; M_stat[i].name[0] != '-'; ++i )
         {
-//          DBG("It is static");
-            if ( conn[ci].if_mod_since >= M_stat[i].modified )
+            if ( !M_stat[i].host[0] && 0==strcmp(M_stat[i].name, conn[ci].uri) && M_stat[i].source != STATIC_SOURCE_SNIPPET )
             {
-//              DBG("Not Modified");
-                conn[ci].status = 304;  /* Not Modified */
+                if ( conn[ci].if_mod_since >= M_stat[i].modified )
+                {
+                    conn[ci].status = 304;  /* Not Modified */
+                }
+
+                return i;
             }
-            return i;
+        }
+    }
+    else    /* side gig */
+    {
+        for ( i=0; M_stat[i].name[0] != '-'; ++i )
+        {
+            if ( 0==strcmp(M_stat[i].host, conn[ci].host_normalized) && 0==strcmp(M_stat[i].name, conn[ci].uri) )
+            {
+                if ( conn[ci].if_mod_since >= M_stat[i].modified )
+                {
+                    conn[ci].status = 304;  /* Not Modified */
+                }
+
+                return i;
+            }
         }
     }
 
@@ -3058,7 +3186,7 @@ static void process_req(int ci)
 
     /* ------------------------------------------------------------------------ */
 
-    conn[ci].location[COLON_POSITION] = '-';    /* no protocol here yet */
+//    conn[ci].location[COLON_POSITION] = '-';    /* no protocol here yet */
 
     /* ------------------------------------------------------------------------ */
 
@@ -3072,6 +3200,24 @@ static void process_req(int ci)
     /* authorization check / log in from cookies ------------------------------ */
 
 #ifdef USERS
+
+#ifdef ALLOW_BEARER_AUTH
+    /* copy bearer token to cookie_in_l */
+
+    if ( !conn[ci].cookie_in_l[0] && conn[ci].authorization[0] )
+    {
+        char type[8];
+        strncpy(type, upper(conn[ci].authorization), 7);
+        type[7] = EOS;
+
+        if ( 0==strcmp(type, "BEARER ") )
+        {
+            strncpy(conn[ci].cookie_in_l, conn[ci].authorization+7, SESID_LEN);
+            conn[ci].cookie_in_l[SESID_LEN] = EOS;
+        }
+    }
+#endif
+
     if ( conn[ci].cookie_in_l[0] )  /* logged in sesid cookie present */
     {
         ret = libusr_luses_ok(ci);     /* is it valid? */
@@ -3091,11 +3237,23 @@ static void process_req(int ci)
     else if ( !LOGGED && conn[ci].required_auth_level > AUTH_LEVEL_ANONYMOUS )  /* redirect to login page */
     {
         INF("auth_level > AUTH_LEVEL_ANONYMOUS required, redirecting to login");
+
         ret = ERR_REDIRECTION;
+
+#ifndef DONT_PASS_QS_ON_LOGIN_REDIRECTION
+        char *qs = strchr(conn[ci].uri, '?');
+
         if ( !strlen(APP_LOGIN_URI) )   /* login page = landing page */
-            sprintf(conn[ci].location, "%s://%s", PROTOCOL, conn[ci].host);
+            sprintf(conn[ci].location, "/%s", qs?qs:"");
+        else
+            sprintf(conn[ci].location, "%s%s", APP_LOGIN_URI, qs?qs:"");
+#else   /* don't pass the query string */
+        if ( !strlen(APP_LOGIN_URI) )   /* login page = landing page */
+            strcpy(conn[ci].location, "/");
         else
             strcpy(conn[ci].location, APP_LOGIN_URI);
+#endif  /* DONT_PASS_QS_ON_LOGIN_REDIRECTION */
+
     }
     else    /* login not required for this URI */
     {
@@ -3119,7 +3277,7 @@ static void process_req(int ci)
     if ( ret == OK )
     {
         if ( !conn[ci].location[0] )
-            silgy_app_main(ci);  /* main application called here */
+            silgy_app_main(ci);         /* main application called here */
     }
 
     /* ------------------------------------------------------------------------ */
@@ -3150,9 +3308,9 @@ static void process_req(int ci)
     if ( ret==ERR_REDIRECTION || conn[ci].status==400 || conn[ci].status==401 || conn[ci].status==403 || conn[ci].status==404 || conn[ci].status==500 || conn[ci].status==503 )
     {
 #ifdef USERS
-        if ( conn[ci].usi && !LOGGED ) close_uses(conn[ci].usi, ci);
+//        if ( conn[ci].usi && !LOGGED ) close_uses(conn[ci].usi, ci);
 #else
-        if ( conn[ci].usi ) close_uses(conn[ci].usi, ci);
+//        if ( conn[ci].usi ) close_uses(conn[ci].usi, ci);
 #endif
         if ( !conn[ci].keep_content )   /* reset out buffer pointer as it could have contained something already */
         {
@@ -3341,59 +3499,37 @@ static int deflate_inplace(z_stream *strm, unsigned char *buf, unsigned len, uns
 -------------------------------------------------------------------------- */
 static void gen_response_header(int ci)
 {
+#ifdef DUMP
+    bool compressed=FALSE;
+#endif
+
     DBG("gen_response_header, ci=%d", ci);
 
     char out_header[OUT_HEADER_BUFSIZE];
     conn[ci].p_header = out_header;
 
+    /* Status */
+
     PRINT_HTTP_STATUS(conn[ci].status);
+
+    /* Date */
+
+    PRINT_HTTP_DATE;
 
     if ( conn[ci].status == 301 || conn[ci].status == 303 )     /* redirection */
     {
+#ifdef DUMP
         DBG("Redirecting");
-
-        /*
-           1 - upgrade 2 https, keep URI (301)
-           2 - app new page version, ignore URI, use location (303)
-           3 - redirect to final domain, keep URI (301)
-        */
+#endif
 #ifdef HTTPS
-        if ( conn[ci].upgrade2https )   /* (1) */
-        {
-            PRINT_HTTP_VARY_UIR;    /* Upgrade-Insecure-Requests */
-            sprintf(G_tmp, "Location: https://%s/%s\r\n", conn[ci].host, conn[ci].uri);
-        }
-        else if ( conn[ci].location[0] == 'h'        /* (2) full address already present */
-#else
-             if ( conn[ci].location[0] == 'h'        /* (2) full address already present */
-#endif  /* HTTPS */
-                    && conn[ci].location[1] == 't'
-                    && conn[ci].location[2] == 't'
-                    && conn[ci].location[3] == 'p' )
+        if ( conn[ci].upgrade2https )   /* Upgrade-Insecure-Requests */
+            PRINT_HTTP_VARY_UIR;
+#endif
+        if ( conn[ci].location[0] )
         {
             sprintf(G_tmp, "Location: %s\r\n", conn[ci].location);
+            HOUT(G_tmp);
         }
-        else if ( conn[ci].location[0] )        /* (2) */
-        {
-            sprintf(G_tmp, "Location: %s://%s/%s\r\n", PROTOCOL, conn[ci].host, conn[ci].location);
-        }
-        else if ( conn[ci].uri[0] ) /* (3) URI */
-        {
-#ifdef DOMAINONLY
-            sprintf(G_tmp, "Location: %s://%s/%s\r\n", PROTOCOL, G_test?conn[ci].host:APP_DOMAIN, conn[ci].uri);
-#else
-            sprintf(G_tmp, "Location: %s://%s/%s\r\n", PROTOCOL, conn[ci].host, conn[ci].uri);
-#endif
-        }
-        else    /* (3) No URI */
-        {
-#ifdef DOMAINONLY
-            sprintf(G_tmp, "Location: %s://%s\r\n", PROTOCOL, G_test?conn[ci].host:APP_DOMAIN);
-#else
-            sprintf(G_tmp, "Location: %s://%s\r\n", PROTOCOL, conn[ci].host);
-#endif
-        }
-        HOUT(G_tmp);
 
         conn[ci].clen = 0;
     }
@@ -3402,13 +3538,19 @@ static void gen_response_header(int ci)
 #ifdef DUMP
         DBG("Not Modified");
 #endif
-        if ( conn[ci].static_res == NOT_STATIC )
+        if ( conn[ci].static_res == NOT_STATIC )    /* generated */
         {
             PRINT_HTTP_LAST_MODIFIED(G_last_modified);
+
+            if ( EXPIRES_GENERATED > 0 )
+                PRINT_HTTP_EXPIRES_GENERATED;
         }
-        else    /* static res */
+        else    /* static resource */
         {
             PRINT_HTTP_LAST_MODIFIED(time_epoch2http(M_stat[conn[ci].static_res].modified));
+
+            if ( EXPIRES_STATICS > 0 )
+                PRINT_HTTP_EXPIRES_STATICS;
         }
 
         conn[ci].clen = 0;
@@ -3460,7 +3602,7 @@ static void gen_response_header(int ci)
 
         /* compress? ------------------------------------------------------------------ */
 
-#ifndef _WIN32  /* just too much headache */
+#ifndef _WIN32  /* in Windows it's just too much headache */
 
         if ( SHOULD_BE_COMPRESSED(conn[ci].clen, conn[ci].ctype) && conn[ci].accept_deflate && !UA_IE )
         {
@@ -3498,6 +3640,9 @@ static          bool first=TRUE;
                     DBG("Compression success, old len=%u, new len=%u", conn[ci].clen, max);
                     conn[ci].clen = max;
                     PRINT_HTTP_CONTENT_ENCODING_DEFLATE;
+#ifdef DUMP
+                    compressed = TRUE;
+#endif
                 }
                 else
                 {
@@ -3509,6 +3654,9 @@ static          bool first=TRUE;
                 conn[ci].out_data = M_stat[conn[ci].static_res].data_deflated;
                 conn[ci].clen = M_stat[conn[ci].static_res].len_deflated;
                 PRINT_HTTP_CONTENT_ENCODING_DEFLATE;
+#ifdef DUMP
+                compressed = TRUE;
+#endif
             }
         }
 #endif  /* _WIN32 */
@@ -3516,17 +3664,47 @@ static          bool first=TRUE;
         /* ---------------------------------------------------------------------------- */
     }
 
-    /* Date */
+    /* Content-Type */
 
-    PRINT_HTTP_DATE;
+    if ( conn[ci].clen == 0 )   /* don't set for these */
+    {                   /* this covers 301, 303 and 304 */
+    }
+    else if ( conn[ci].ctypestr[0] )    /* custom */
+    {
+        sprintf(G_tmp, "Content-Type: %s\r\n", conn[ci].ctypestr);
+        HOUT(G_tmp);
+    }
+    else if ( conn[ci].ctype != CONTENT_TYPE_UNSET )
+    {
+        print_content_type(ci, conn[ci].ctype);
+    }
 
-    /* Connection */
-
-    PRINT_HTTP_CONNECTION(ci);
+    if ( conn[ci].cdisp[0] )
+    {
+        sprintf(G_tmp, "Content-Disposition: %s\r\n", conn[ci].cdisp);
+        HOUT(G_tmp);
+    }
 
     /* Content-Length */
 
     PRINT_HTTP_CONTENT_LEN(conn[ci].clen);
+
+    /* Security */
+
+    if ( conn[ci].clen > 0 )
+    {
+#ifndef NO_SAMEORIGIN
+        PRINT_HTTP_SAMEORIGIN;
+#endif
+
+#ifndef NO_NOSNIFF
+        PRINT_HTTP_NOSNIFF;
+#endif
+    }
+
+    /* Connection */
+
+    PRINT_HTTP_CONNECTION(ci);
 
     /* Cookie */
 
@@ -3557,34 +3735,9 @@ static          bool first=TRUE;
         }
     }
 
-    /* Content-Type */
-
-    if ( conn[ci].clen == 0 )   /* don't set for these */
-    {                   /* this covers 301, 303 and 304 */
-    }
-//    else if ( conn[ci].static_res != NOT_STATIC )   /* static resource */
-//    {
-//        print_content_type(ci, M_stat[conn[ci].static_res].type);
-//    }
-    else if ( conn[ci].ctype == CONTENT_TYPE_USER )
-    {
-        sprintf(G_tmp, "Content-Type: %s\r\n", conn[ci].ctypestr);
-        HOUT(G_tmp);
-    }
-    else if ( conn[ci].ctype != CONTENT_TYPE_UNSET )
-    {
-        print_content_type(ci, conn[ci].ctype);
-    }
-
-    if ( conn[ci].cdisp[0] )
-    {
-        sprintf(G_tmp, "Content-Disposition: %s\r\n", conn[ci].cdisp);
-        HOUT(G_tmp);
-    }
-
 #ifdef HTTPS
 #ifndef NO_HSTS
-    if ( !G_test && !conn[ci].secure )
+    if ( conn[ci].secure )
         PRINT_HTTP_HSTS;
 #endif
 #endif  /* HTTPS */
@@ -3592,6 +3745,14 @@ static          bool first=TRUE;
 #ifndef NO_IDENTITY
     PRINT_HTTP_SERVER;
 #endif
+
+    /* ------------------------------------------------------------- */
+    /* custom headers */
+
+    if ( conn[ci].cust_headers[0] )
+    {
+        HOUT(conn[ci].cust_headers);
+    }
 
     /* ------------------------------------------------------------- */
 
@@ -3633,7 +3794,11 @@ static          bool first=TRUE;
     /* ----------------------------------------------------------------- */
 
 #ifdef DUMP     /* low-level tests */
-    if ( G_logLevel>=LOG_DBG && conn[ci].clen > 0 && !conn[ci].head_only && conn[ci].static_res == NOT_STATIC
+    if ( G_logLevel>=LOG_DBG
+            && conn[ci].clen > 0
+            && !conn[ci].head_only
+            && conn[ci].static_res==NOT_STATIC
+            && !compressed
             && (conn[ci].ctype==RES_TEXT || conn[ci].ctype==RES_JSON) )
         log_long(conn[ci].out_data+OUT_HEADER_BUFSIZE, conn[ci].clen, "Content to send");
 #endif  /* DUMP */
@@ -3649,6 +3814,7 @@ static          bool first=TRUE;
 
 /* --------------------------------------------------------------------------
    Print Content-Type to response header
+   Mirrored lib_set_res_content_type
 -------------------------------------------------------------------------- */
 static void print_content_type(int ci, char type)
 {
@@ -3811,7 +3977,8 @@ static void close_uses(int usi, int ci)
 static void reset_conn(int ci, char new_state)
 {
 #ifdef DUMP
-    DBG("Resetting connection ci=%d, fd=%d, new state == %s\n", ci, conn[ci].fd, new_state==CONN_STATE_CONNECTED?"CONN_STATE_CONNECTED":"CONN_STATE_DISCONNECTED");
+    if ( G_initialized )
+        DBG("Resetting connection ci=%d, fd=%d, new state == %s\n", ci, conn[ci].fd, new_state==CONN_STATE_CONNECTED?"CONN_STATE_CONNECTED":"CONN_STATE_DISCONNECTED");
 #endif
 
     conn[ci].conn_state = new_state;
@@ -3832,6 +3999,7 @@ static void reset_conn(int ci, char new_state)
     conn[ci].req1[0] = EOS;
     conn[ci].req2[0] = EOS;
     conn[ci].req3[0] = EOS;
+    conn[ci].id[0] = EOS;
     conn[ci].uagent[0] = EOS;
     conn[ci].mobile = FALSE;
     conn[ci].referer[0] = EOS;
@@ -3850,6 +4018,10 @@ static void reset_conn(int ci, char new_state)
     conn[ci].authorization[0] = EOS;
     conn[ci].required_auth_level = DEF_RES_AUTH_LEVEL;
 
+    /* what goes out */
+
+    conn[ci].cust_headers[0] = EOS;
+
     conn[ci].out_data = conn[ci].out_data_alloc;
 
     if ( new_state == CONN_STATE_DISCONNECTED )
@@ -3857,6 +4029,7 @@ static void reset_conn(int ci, char new_state)
 
     conn[ci].static_res = NOT_STATIC;
     conn[ci].ctype = RES_HTML;
+    conn[ci].ctypestr[0] = EOS;
     conn[ci].cdisp[0] = EOS;
     conn[ci].modified = 0;
     conn[ci].cookie_out_a[0] = EOS;
@@ -3869,11 +4042,11 @@ static void reset_conn(int ci, char new_state)
     conn[ci].dont_cache = FALSE;
     conn[ci].keep_content = FALSE;
     conn[ci].accept_deflate = FALSE;
+    conn[ci].host_id = 0;
 
 #ifdef ASYNC
     conn[ci].service[0] = EOS;
     conn[ci].async_err_code = OK;
-//    conn[ci].ai = -1;
 #endif
 
     if ( new_state == CONN_STATE_CONNECTED )
@@ -4007,7 +4180,7 @@ static int parse_req(int ci, int len)
     i += 2;     /* skip " /" */
     int j=0;
 
-    for ( i; i<hlen; ++i )  /* URI */
+    for ( i; i<hlen; ++i )   /* URI */
     {
         if ( conn[ci].in[i] != ' ' && conn[ci].in[i] != '\t' )
         {
@@ -4015,8 +4188,8 @@ static int parse_req(int ci, int len)
                 conn[ci].uri[j++] = conn[ci].in[i];
             else
             {
-                ERR("URI too long, ignoring");
-                return 414; /* Request-URI Too Long */
+                WAR("URI too long, ignoring");
+                return 414;  /* Request-URI Too Long */
             }
         }
         else    /* end of URI */
@@ -4024,6 +4197,13 @@ static int parse_req(int ci, int len)
             conn[ci].uri[j] = EOS;
             break;
         }
+    }
+
+    /* strip the trailing slash off */
+
+    if ( j && conn[ci].uri[j-1] == '/' )
+    {
+        conn[ci].uri[j-1] = EOS;
     }
 
 #ifdef APP_ROOT_URI
@@ -4066,6 +4246,7 @@ static int parse_req(int ci, int len)
 #endif
 
     /* -------------------------------------------------------------- */
+    /* parse the rest of the header */
 
     char flg_data=FALSE;
     char now_label=TRUE;
@@ -4141,14 +4322,29 @@ static int parse_req(int ci, int len)
         }
     }
 
-    /* behave as one good web server ------------------------------------- */
+    /* -------------------------------------------------------------- */
+    /* determine whether main host has been requested */
+
+    for ( i=0; i<M_hosts_cnt; ++i )
+    {
+        if ( 0==strcmp(M_hosts[i].host, conn[ci].host_normalized) )
+        {
+            conn[ci].host_id = i;
+            break;
+        }
+    }
+
+    /* Serve index if present --------------------------------------- */
 
 #ifndef DONT_LOOK_FOR_INDEX
 
-    if ( conn[ci].uri[0]==EOS && G_index_present && REQ_GET )
+    if ( !conn[ci].uri[0] && REQ_GET )
     {
-        INF("Serving index.html");
-        strcpy(conn[ci].uri, "index.html");
+        if ( (!conn[ci].host_id && G_index_present) || M_hosts[conn[ci].host_id].index_present )
+        {
+            INF("Serving index.html");
+            strcpy(conn[ci].uri, "index.html");
+        }
     }
 
 #endif  /* DONT_LOOK_FOR_INDEX */
@@ -4157,12 +4353,13 @@ static int parse_req(int ci, int len)
 
     if ( conn[ci].uri[0] )  /* if not empty */
     {
-        if ( (0==strcmp(conn[ci].uri, "favicon.ico") && !M_favicon_exists)
-                || (0==strcmp(conn[ci].uri, "robots.txt") && !M_robots_exists)
-                || (0==strcmp(conn[ci].uri, "apple-touch-icon.png") && !M_appleicon_exists) )
+        if ( (0==strcmp(conn[ci].uri, "favicon.ico") && !M_popular_favicon)
+                || (0==strcmp(conn[ci].uri, "apple-touch-icon.png") && !M_popular_appleicon)
+                || (0==strcmp(conn[ci].uri, "robots.txt") && !M_popular_robots)
+                || (0==strcmp(conn[ci].uri, "sw.js") && !M_popular_sw) )
             return 404;     /* Not Found */
 
-        /* cut query string off */
+        /* cut the query string off */
 
         char uri[MAX_URI_LEN+1];
         int  uri_i=0;
@@ -4176,6 +4373,7 @@ static int parse_req(int ci, int len)
 
         DBG("uri w/o qs [%s]", uri);
 
+        /* -------------------------------------------------------------- */
         /* tokenize */
 
         const char slash[]="/";
@@ -4216,26 +4414,50 @@ static int parse_req(int ci, int len)
             }
         }
 
+        /* -------------------------------------------------------------- */
+        /* ID for REST stuff */
+
+        char *last_slash = strrchr(conn[ci].uri, '/');
+
+        if ( last_slash )
+        {
+            ++last_slash;   /* skip '/' */
+
+            uri_i = 0;
+
+            while ( *last_slash && *last_slash != '?' && uri_i < MAX_RESOURCE_LEN-1 )
+                conn[ci].id[uri_i++] = *last_slash++;
+
+            conn[ci].id[uri_i] = EOS;
+        }
+
+        /* -------------------------------------------------------------- */
+
+#ifdef DUMP
         DBG("REQ0 [%s]", conn[ci].resource);
         DBG("REQ1 [%s]", conn[ci].req1);
         DBG("REQ2 [%s]", conn[ci].req2);
         DBG("REQ3 [%s]", conn[ci].req3);
+        DBG("  ID [%s]", conn[ci].id);
+#endif
+        /* -------------------------------------------------------------- */
 
-        conn[ci].static_res = is_static_res(ci, conn[ci].uri);    /* statics --> set the flag!!! */
+        conn[ci].static_res = is_static_res(ci);    /* statics --> set the flag!!! */
         /* now, it may have set conn[ci].status to 304 */
 
         if ( conn[ci].static_res != NOT_STATIC )    /* static resource */
             conn[ci].out_data = M_stat[conn[ci].static_res].data;
     }
 
+    /* -------------------------------------------------------------- */
     /* get the required authorization level for this resource */
 
     if ( conn[ci].static_res == NOT_STATIC )
     {
         i = 0;
-        while ( M_auth_levels[i].resource[0] != '-' )
+        while ( M_auth_levels[i].path[0] != '-' )
         {
-            if ( REQ(M_auth_levels[i].resource) )
+            if ( URI(M_auth_levels[i].path) )
             {
                 conn[ci].required_auth_level = M_auth_levels[i].level;
                 break;
@@ -4272,13 +4494,169 @@ static int parse_req(int ci, int len)
 
 #ifdef BLACKLISTAUTOUPDATE
         if ( check_block_ip(ci, "Resource", conn[ci].resource) )
-            return 403;     /* Forbidden */
+            return 404;     /* Forbidden */
 #endif
 
-#ifdef DOMAINONLY
-        if ( !G_test && 0!=strcmp(conn[ci].host, APP_DOMAIN) )
-            return 301;     /* Moved permanently */
+    /* Redirection? ------------------------------------------------------------- */
+    /*
+
+    Test Cases (for HTTPS enabled)
+
+    +------------+------+----------------------------+------------------------+
+    | DOMAINONLY | HSTS | request                    | result                 |
+    +            +      +------------------+---------+------+-----------------+
+    |            |      | url              | U2HTTPS | code | location        |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | F    | http://domain    | F       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | F    | http://domain    | T       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | F    | http://1.2.3.4   | F       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | F    | http://1.2.3.4   | T       | 301  | https://1.2.3.4 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | F    | https://domain   | F       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | F    | https://domain   | T       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | F    | https://1.2.3.4  | F       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | F    | https://1.2.3.4  | T       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | T    | http://domain    | F       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | T    | http://domain    | T       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | T    | http://1.2.3.4   | F       | 200  | https://1.2.3.4 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | T    | http://1.2.3.4   | T       | 200  | https://1.2.3.4 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | T    | https://domain   | F       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | T    | https://domain   | T       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | T    | https://1.2.3.4  | F       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | F          | T    | https://1.2.3.4  | T       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+
+    (DOMAINONLY enabled)
+
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | F    | http://domain    | F       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | F    | http://domain    | T       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | F    | http://1.2.3.4   | F       | 301  | http://domain   |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | F    | http://1.2.3.4   | T       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | F    | https://domain   | F       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | F    | https://domain   | T       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | F    | https://1.2.3.4  | F       | 301  | http://domain   |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | F    | https://1.2.3.4  | T       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | T    | http://domain    | F       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | T    | http://domain    | T       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | T    | http://1.2.3.4   | F       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | T    | http://1.2.3.4   | T       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | T    | https://domain   | F       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | T    | https://domain   | T       | 200  |                 |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | T    | https://1.2.3.4  | F       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    | T          | T    | https://1.2.3.4  | T       | 301  | https://domain  |
+    +------------+------+------------------+---------+------+-----------------+
+    */
+
+    if ( !G_test )   /* don't redirect if test */
+    {
+
+#ifdef HTTPS
+
+#ifdef HSTS_ON
+        if ( !conn[ci].secure )
+        {
+#ifdef DUMP
+            DBG("Redirecting due to HSTS");
 #endif
+#ifdef DOMAINONLY
+            if ( conn[ci].uri[0] )
+                RES_LOCATION("https://%s/%s", APP_DOMAIN, conn[ci].uri);
+            else
+                RES_LOCATION("https://%s", APP_DOMAIN);
+#else
+            if ( conn[ci].uri[0] )
+                RES_LOCATION("https://%s/%s", conn[ci].host, conn[ci].uri);
+            else
+                RES_LOCATION("https://%s", conn[ci].host);
+#endif
+            return 301;
+        }
+#endif  /* HSTS_ON */
+
+        if ( !conn[ci].secure && conn[ci].upgrade2https )
+        {
+#ifdef DUMP
+            DBG("Redirecting due to upgrade2https");
+#endif
+#ifdef DOMAINONLY
+            if ( conn[ci].uri[0] )
+                RES_LOCATION("https://%s/%s", APP_DOMAIN, conn[ci].uri);
+            else
+                RES_LOCATION("https://%s", APP_DOMAIN);
+#else
+            if ( conn[ci].uri[0] )
+                RES_LOCATION("https://%s/%s", conn[ci].host, conn[ci].uri);
+            else
+                RES_LOCATION("https://%s", conn[ci].host);
+#endif
+            return 301;
+        }
+
+#ifdef DOMAINONLY
+        if ( 0 != strcmp(conn[ci].host, APP_DOMAIN) )
+        {
+#ifdef DUMP
+            DBG("Redirecting due to DOMAINONLY");
+#endif
+            if ( conn[ci].uri[0] )
+                RES_LOCATION("%s://%s/%s", PROTOCOL, APP_DOMAIN, conn[ci].uri);
+            else
+                RES_LOCATION("%s://%s", PROTOCOL, APP_DOMAIN);
+
+            return 301;
+        }
+#endif  /* DOMAINONLY */
+
+#else   /* not HTTPS */
+
+#ifdef DOMAINONLY
+        if ( 0 != strcmp(conn[ci].host, APP_DOMAIN) )
+        {
+#ifdef DUMP
+            DBG("Redirecting due to DOMAINONLY");
+#endif
+            if ( conn[ci].uri[0] )
+                RES_LOCATION("http://%s/%s", APP_DOMAIN, conn[ci].uri);
+            else
+                RES_LOCATION("http://%s", APP_DOMAIN);
+
+            return 301;
+        }
+#endif  /* DOMAINONLY */
+
+#endif  /* HTTPS */
+
+    }
 
     /* handle the POST content -------------------------------------------------- */
 
@@ -4359,15 +4737,35 @@ static int set_http_req_val(int ci, const char *label, const char *value)
     {
 #ifdef BLACKLISTAUTOUPDATE
         if ( check_block_ip(ci, "Host", value) )
-            return 403;     /* Forbidden */
+            return 404;     /* Forbidden */
 #endif
         strcpy(conn[ci].host, value);
+
+        /* normalize for comparisons */
+        /* upper */
+
+        strcpy(conn[ci].host_normalized, upper(value));
+
+        /* cut the port off */
+
+        i = 0;
+
+        while ( conn[ci].host_normalized[i] )
+        {
+            if ( conn[ci].host_normalized[i] == ':' )
+            {
+                conn[ci].host_normalized[i] = EOS;
+                break;
+            }
+
+            ++i;
+        }
     }
     else if ( 0==strcmp(ulabel, "USER-AGENT") )
     {
 #ifdef BLACKLISTAUTOUPDATE
         if ( check_block_ip(ci, "User-Agent", value) )
-            return 403;     /* Forbidden */
+            return 404;     /* Forbidden */
 #endif
         strcpy(conn[ci].uagent, value);
         strcpy(uvalue, upper(value));
@@ -4378,33 +4776,11 @@ static int set_http_req_val(int ci, const char *label, const char *value)
 
         DBG("mobile = %s", conn[ci].mobile?"TRUE":"FALSE");
 
-/*      if ( !REQ_BOT &&
-                (strstr(uvalue, "ADSBOT")
-                || strstr(uvalue, "BAIDU")
-                || strstr(uvalue, "UPTIMEBOT")
-                || strstr(uvalue, "SEMRUSHBOT")
-                || strstr(uvalue, "SEZNAMBOT")
-                || strstr(uvalue, "SCANBOT")
-                || strstr(uvalue, "SYSSCAN")
-                || strstr(uvalue, "DOMAINSONO")
-                || strstr(uvalue, "SURDOTLY")
-                || strstr(uvalue, "DOTBOT")
-                || strstr(uvalue, "ALPHABOT")
-                || strstr(uvalue, "AHREFSBOT")
-                || strstr(uvalue, "CRAWLER")
-                || 0==strncmp(uvalue, "MASSCAN", 7)
-                || 0==strncmp(uvalue, "CURL", 4)
-                || 0==strncmp(uvalue, "CCBOT", 5)
-                || 0==strcmp(uvalue, "TELESPHOREO")
-                || 0==strcmp(uvalue, "MAGIC BROWSER")) )
-        {
-            REQ_BOT = TRUE;
-        } */
-
         if ( !REQ_BOT &&
                 (strstr(uvalue, "BOT")
                 || strstr(uvalue, "SCAN")
                 || strstr(uvalue, "CRAWLER")
+                || strstr(uvalue, "SPIDER")
                 || strstr(uvalue, "SURDOTLY")
                 || strstr(uvalue, "BAIDU")
                 || strstr(uvalue, "ZGRAB")
@@ -4506,18 +4882,30 @@ static int set_http_req_val(int ci, const char *label, const char *value)
         conn[ci].lang[i] = EOS;
 
         DBG("conn[ci].lang: [%s]", conn[ci].lang);
+
+        /* for silgy_message and lib_get_string if no session */
+
+        strcpy(uses[0].lang, conn[ci].lang);
+
+        lib_set_datetime_formats(conn[ci].lang);
     }
     else if ( 0==strcmp(ulabel, "CONTENT-TYPE") )
     {
         strcpy(conn[ci].in_ctypestr, value);
 
+        strcpy(uvalue, upper(value));
+
         int len = strlen(value);
 
-        if ( len > 32 && 0==strncmp(value, "application/x-www-form-urlencoded", 33) )
+        if ( len > 15 && 0==strncmp(uvalue, "APPLICATION/JSON", 16) )
+        {
+            conn[ci].in_ctype = CONTENT_TYPE_JSON;
+        }
+        else if ( len > 32 && 0==strncmp(uvalue, "APPLICATION/X-WWW-FORM-URLENCODED", 33) )
         {
             conn[ci].in_ctype = CONTENT_TYPE_URLENCODED;
         }
-        else if ( len > 18 && 0==strncmp(value, "multipart/form-data", 19) )
+        else if ( len > 18 && 0==strncmp(uvalue, "MULTIPART/FORM-DATA", 19) )
         {
             conn[ci].in_ctype = CONTENT_TYPE_MULTIPART;
 
@@ -4527,7 +4915,7 @@ static int set_http_req_val(int ci, const char *label, const char *value)
                 DBG("boundary: [%s]", conn[ci].boundary);
             }
         }
-        else if ( len > 23 && 0==strncmp(value, "application/octet-stream", 24) )
+        else if ( len > 23 && 0==strncmp(uvalue, "APPLICATION/OCTET-STREAM", 24) )
         {
             conn[ci].in_ctype = CONTENT_TYPE_OCTET_STREAM;
         }
@@ -4665,12 +5053,17 @@ static void clean_up()
     }
 
 #ifdef DBMYSQL
-    lib_close_db();
+#ifdef USERS
+    libusr_luses_save_csrft();
 #endif
+    lib_close_db();
+#endif  /* DBMYSQL */
+
 #ifdef HTTPS
     SSL_CTX_free(M_ssl_ctx);
     EVP_cleanup();
 #endif
+
 #ifdef ASYNC
     if (G_queue_req)
     {
@@ -4682,7 +5075,7 @@ static void clean_up()
         mq_close(G_queue_res);
         mq_unlink(G_res_queue_name);
     }
-#endif
+#endif  /* ASYNC */
 
 #ifdef _WIN32   /* Windows */
     WSACleanup();
@@ -4848,17 +5241,18 @@ static bool init_ssl()
 /* --------------------------------------------------------------------------
    Set required authorization level for the resource
 -------------------------------------------------------------------------- */
-void silgy_set_auth_level(const char *resource, short level)
+void silgy_set_auth_level(const char *path, char level)
 {
 static int current=0;
 
     if ( current > MAX_RESOURCES-2 )
         return;
 
-    strcpy(M_auth_levels[current].resource, resource);
+    strncpy(M_auth_levels[current].path, path, 255);
+    M_auth_levels[current].path[255] = EOS;
     M_auth_levels[current].level = level;
 
-    strcpy(M_auth_levels[++current].resource, "-");
+    strcpy(M_auth_levels[++current].path, "-");
 }
 
 
@@ -4900,7 +5294,7 @@ int eng_uses_start(int ci, const char *sesid)
         silgy_random(new_sesid, SESID_LEN);
     }
 
-    INF("Starting new session, usi=%d, sesid [%s]", conn[ci].usi, new_sesid);
+    INF("Starting new session for ci=%d, usi=%d, sesid [%s]", ci, conn[ci].usi, new_sesid);
 
     /* add record to uses */
 
@@ -4911,6 +5305,12 @@ int eng_uses_start(int ci, const char *sesid)
     strcpy(US.lang, conn[ci].lang);
 
     lib_set_datetime_formats(US.lang);
+
+    /* generate CSRF token */
+
+    silgy_random(US.csrft, CSRFT_LEN);
+
+    DBG("New csrft generated [%s]", US.csrft);
 
     /* custom session init */
 
@@ -4937,7 +5337,7 @@ int eng_uses_start(int ci, const char *sesid)
    Invalidate active user sessions belonging to user_id
    Called after password change
 -------------------------------------------------------------------------- */
-void eng_uses_downgrade_by_uid(long uid, int ci)
+void eng_uses_downgrade_by_uid(int uid, int ci)
 {
 #ifdef USERS
     int i;
@@ -4985,11 +5385,13 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
 
     /* conn */
 
+    req.hdr.secure = conn[ci].secure;
     strcpy(req.hdr.ip, conn[ci].ip);
     strcpy(req.hdr.method, conn[ci].method);
     req.hdr.post = conn[ci].post;
     strcpy(req.hdr.uri, conn[ci].uri);
     strcpy(req.hdr.resource, conn[ci].resource);
+    strcpy(req.hdr.id, conn[ci].id);
     strcpy(req.hdr.uagent, conn[ci].uagent);
     req.hdr.mobile = conn[ci].mobile;
     strcpy(req.hdr.referer, conn[ci].referer);
@@ -5000,11 +5402,17 @@ void eng_async_req(int ci, const char *service, const char *data, char response,
     req.hdr.in_ctype = conn[ci].in_ctype;
     strcpy(req.hdr.boundary, conn[ci].boundary);
     req.hdr.status = conn[ci].status;
+    strcpy(req.hdr.cust_headers, conn[ci].cust_headers);
     req.hdr.ctype = conn[ci].ctype;
+    strcpy(req.hdr.ctypestr, conn[ci].ctypestr);
+    strcpy(req.hdr.cdisp, conn[ci].cdisp);
     strcpy(req.hdr.cookie_out_a, conn[ci].cookie_out_a);
     strcpy(req.hdr.cookie_out_a_exp, conn[ci].cookie_out_a_exp);
     strcpy(req.hdr.cookie_out_l, conn[ci].cookie_out_l);
     strcpy(req.hdr.cookie_out_l_exp, conn[ci].cookie_out_l_exp);
+    strcpy(req.hdr.location, conn[ci].location);
+    req.hdr.dont_cache = conn[ci].dont_cache;
+    req.hdr.keep_content = conn[ci].keep_content;
 
     /* For POST, the payload can be in the data space of the message,
        or -- if it's bigger -- in the shared memory */
@@ -5203,17 +5611,91 @@ void eng_block_ip(const char *value, bool autoblocked)
 
 
 /* --------------------------------------------------------------------------
-   Return true if host matches
+   Return true if host matches requested host
 -------------------------------------------------------------------------- */
-bool eng_host(int ci, const char *host)
+/*bool eng_host(int ci, const char *host)
 {
-    char uhost[64];
-    char conn_uhost[64];
+    return (0==strcmp(conn[ci].host_normalized, upper(host)));
+}*/
 
-    strcpy(uhost, upper(host));
-    strcpy(conn_uhost, upper(conn[ci].host));
 
-    return (0==strcmp(conn_uhost, uhost));
+/* --------------------------------------------------------------------------
+   Assign resource directories to a host
+-------------------------------------------------------------------------- */
+bool silgy_set_host_res(const char *host, const char *res, const char *resmin)
+{
+    if ( M_hosts_cnt >= MAX_HOSTS ) return FALSE;
+
+    COPY(M_hosts[M_hosts_cnt].host, upper(host), 255);
+    COPY(M_hosts[M_hosts_cnt].res, res, 255);
+    COPY(M_hosts[M_hosts_cnt].resmin, resmin, 255);
+
+    ++M_hosts_cnt;
+
+    return TRUE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Return true if request URI matches uri
+
+    uri    | request     | result
+   --------+-------------+--------
+    log    | log         | T
+           | log?qs=1    | T
+           | logout      | F
+           | logout?qs=1 | F
+   --------+-------------+--------
+    logout | log         | F
+           | log?qs=1    | F
+           | logout      | T
+           | logout?qs=1 | T
+   --------+-------------+--------
+    log*   | log         | T
+           | log?qs=1    | T
+           | logout      | T
+           | logout?qs=1 | T
+-------------------------------------------------------------------------- */
+bool eng_is_uri(int ci, const char *uri)
+{
+    const char *u = uri;
+
+    if ( uri[0] == '/' )
+        ++u;
+
+    int len = strlen(u);
+
+    if ( *(u+len-1) == '*' )
+    {
+        len--;
+        return (0==strncmp(conn[ci].uri, u, len));
+    }
+    else if ( len > 4
+                        && *(u+len-4)=='{'
+                        && (*(u+len-3)=='i' || *(u+len-3)=='I')
+                        && (*(u+len-2)=='d' || *(u+len-2)=='D')
+                        && *(u+len-1)=='}' )
+    {
+        len -= 4;
+        return (0==strncmp(conn[ci].uri, u, len));
+    }
+
+    /* ------------------------------------------------------------------- */
+    /* no wildcard ==> exact match is required, but excluding query string */
+
+    char *q = strchr(conn[ci].uri, '?');
+
+    if ( !q )
+        return (0==strcmp(conn[ci].uri, u));
+
+    /* there's a query string */
+
+    int req_len = q - conn[ci].uri;
+
+    if ( req_len != len )
+        return FALSE;
+
+    return (0==strncmp(conn[ci].uri, u, len));
 }
 
 
@@ -5412,7 +5894,7 @@ unsigned    out_data_allocated;
 #endif
 char        *p_content=NULL;
 conn_t      conn[MAX_CONNECTIONS+1]={0}; /* request details */
-int         ci=0;
+//int         ci=0;
 usession_t  uses[MAX_SESSIONS+1]={0};   /* user sessions -- they start from 1 */
 ausession_t auses[MAX_SESSIONS+1]={0};  /* app user sessions, using the same index (usi) */
 
@@ -5422,13 +5904,14 @@ counters_t  G_cnts_today={0};           /* today's counters */
 counters_t  G_cnts_yesterday={0};       /* yesterday's counters */
 counters_t  G_cnts_day_before={0};      /* day before's counters */
 
-unsigned    G_days_up=0;                /* web server's days up */
+int         G_days_up=0;                /* web server's days up */
 int         G_open_conn=0;              /* number of open connections */
 int         G_open_conn_hwm=0;          /* highest number of open connections (high water mark) */
 int         G_sessions=0;               /* number of active user sessions */
 int         G_sessions_hwm=0;           /* highest number of active user sessions (high water mark) */
 int         G_blacklist_cnt=0;          /* G_blacklist length */
 char        G_last_modified[32]="";     /* response header field with server's start time */
+bool        G_initialized=0;
 
 
 #ifdef DBMYSQL
@@ -5459,10 +5942,6 @@ int main(int argc, char *argv[])
     /* library init ------------------------------------------------------ */
 
     silgy_lib_init();
-
-#ifdef USERS
-    libusr_init();
-#endif
 
     /* read the config file or set defaults ------------------------------ */
 
@@ -5538,10 +6017,16 @@ int main(int argc, char *argv[])
     signal(SIGPIPE, SIG_IGN);   /* ignore SIGPIPE */
 #endif
 
+    /* USERS library init ------------------------------------------------ */
+
+#ifdef USERS
+    libusr_init();
+#endif
+
     /* init dummy conn structure ----------------------------------------- */
 
-    strcpy(conn[0].host, APP_DOMAIN);
-    strcpy(conn[0].website, APP_WEBSITE);
+    COPY(conn[0].host, APP_DOMAIN, MAX_VALUE_LEN);
+    COPY(conn[0].website, APP_WEBSITE, WEBSITE_LEN);
 
     if ( !(conn[0].in_data = (char*)malloc(G_async_req_data_size)) )
     {
@@ -5562,6 +6047,14 @@ int main(int argc, char *argv[])
     out_data_allocated = OUT_BUFSIZE;
 
 #endif  /* OUTCHECKREALLOC */
+
+    /* load snippets ----------------------------------------------------- */
+
+    if ( !read_snippets(TRUE, NULL) )
+    {
+        ERR("read_snippets() failed");
+        return EXIT_FAILURE;
+    }
 
     /* open database ----------------------------------------------------- */
 
@@ -5640,6 +6133,10 @@ int main(int argc, char *argv[])
 
     /* ------------------------------------------------------------------- */
 
+    sort_messages();
+
+    G_initialized = 1;
+
     int prev_day = G_ptm->tm_mday;
 
     INF("\nWaiting...\n");
@@ -5669,6 +6166,13 @@ int main(int argc, char *argv[])
                 prev_day = G_ptm->tm_mday;
 
                 init_random_numbers();
+
+                if ( !read_snippets(FALSE, NULL) )
+                {
+                    ERR("read_snippets() failed");
+                    clean_up();
+                    return EXIT_FAILURE;
+                }
             }
 
             DBG_T("Message received");
@@ -5686,11 +6190,13 @@ int main(int argc, char *argv[])
 
             /* request details */
 
+            conn[0].secure = req.hdr.secure;
             strcpy(conn[0].ip, req.hdr.ip);
             strcpy(conn[0].method, req.hdr.method);
             conn[0].post = req.hdr.post;
             strcpy(conn[0].uri, req.hdr.uri);
             strcpy(conn[0].resource, req.hdr.resource);
+            strcpy(conn[0].id, req.hdr.id);
             strcpy(conn[0].uagent, req.hdr.uagent);
             conn[0].mobile = req.hdr.mobile;
             strcpy(conn[0].referer, req.hdr.referer);
@@ -5701,11 +6207,17 @@ int main(int argc, char *argv[])
             conn[0].in_ctype = req.hdr.in_ctype;
             strcpy(conn[0].boundary, req.hdr.boundary);
             conn[0].status = req.hdr.status;
+            strcpy(conn[0].cust_headers, req.hdr.cust_headers);
             conn[0].ctype = req.hdr.ctype;
+            strcpy(conn[0].ctypestr, req.hdr.ctypestr);
+            strcpy(conn[0].cdisp, req.hdr.cdisp);
             strcpy(conn[0].cookie_out_a, req.hdr.cookie_out_a);
             strcpy(conn[0].cookie_out_a_exp, req.hdr.cookie_out_a_exp);
             strcpy(conn[0].cookie_out_l, req.hdr.cookie_out_l);
             strcpy(conn[0].cookie_out_l_exp, req.hdr.cookie_out_l_exp);
+            strcpy(conn[0].location, req.hdr.location);
+            conn[0].dont_cache = req.hdr.dont_cache;
+            conn[0].keep_content = req.hdr.keep_content;
 
             /* For POST, the payload can be in the data space of the message,
                or -- if it's bigger -- in the shared memory */
@@ -5756,7 +6268,10 @@ int main(int argc, char *argv[])
             if ( uses[1].sesid[0] )
                 conn[0].usi = 1;    /* user session present */
             else
+            {
                 conn[0].usi = 0;    /* no session */
+                strcpy(uses[0].lang, conn[0].lang);  /* for silgy_message and lib_get_string */
+            }
 
             /* globals */
 
@@ -5774,8 +6289,7 @@ int main(int argc, char *argv[])
 
             strcpy(G_last_modified, req.hdr.last_modified);
 
-            if ( conn[0].usi )
-                lib_set_datetime_formats(US.lang);
+            lib_set_datetime_formats(uses[conn[0].usi].lang);
 
             /* ----------------------------------------------------------- */
 
@@ -5790,7 +6304,7 @@ int main(int argc, char *argv[])
 #endif
             /* ----------------------------------------------------------- */
 
-            silgy_svc_main();
+            silgy_svc_main(0);
 
             /* ----------------------------------------------------------- */
 
@@ -5801,6 +6315,7 @@ int main(int argc, char *argv[])
                 res.hdr.err_code = G_error_code;
 
                 res.hdr.status = conn[0].status;
+                strcpy(res.hdr.cust_headers, conn[0].cust_headers);
                 res.hdr.ctype = conn[0].ctype;
                 strcpy(res.hdr.ctypestr, conn[0].ctypestr);
                 strcpy(res.hdr.cdisp, conn[0].cdisp);
@@ -5976,7 +6491,7 @@ int eng_uses_start(int ci, const char *sesid)
    Invalidate active user sessions belonging to user_id
    Called after password change
 -------------------------------------------------------------------------- */
-void eng_uses_downgrade_by_uid(long uid, int ci)
+void eng_uses_downgrade_by_uid(int uid, int ci)
 {
     res.hdr.invalidate_uid = uid;
     res.hdr.invalidate_ci = ci;

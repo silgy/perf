@@ -11,7 +11,7 @@
 
 
 #define DB_UAGENT_LEN                   250                     /* User-Agent length stored in ulogins table */
-#define PASSWD_RESET_KEY_LEN            30                      /* password reset key length */
+#define PASSWD_RESET_KEY_LEN            20                      /* password reset key length */
 
 #ifdef APP_MIN_USERNAME_LEN                                     /* minimum user name length */
 #define MIN_USERNAME_LEN                APP_MIN_USERNAME_LEN
@@ -66,6 +66,22 @@
 #endif
 
 
+#define COMMON_PASSWORDS_FILE           "passwords.txt"
+
+
+#ifndef REFUSE_10_COMMON_PASSWORDS
+#ifndef REFUSE_100_COMMON_PASSWORDS
+#ifndef REFUSE_1000_COMMON_PASSWORDS
+#ifndef REFUSE_10000_COMMON_PASSWORDS
+#ifndef DONT_REFUSE_COMMON_PASSWORDS
+#define DONT_REFUSE_COMMON_PASSWORDS
+#endif
+#endif
+#endif
+#endif
+#endif
+
+
 /* Silgy engine errors are 0 ... 99 */
 
 /* ------------------------------------- */
@@ -90,6 +106,10 @@
 /* password */
 #define ERR_INVALID_PASSWORD            121
 #define ERR_PASSWORD_TOO_SHORT          122
+#define ERR_IN_10_COMMON_PASSWORDS      123
+#define ERR_IN_100_COMMON_PASSWORDS     124
+#define ERR_IN_1000_COMMON_PASSWORDS    125
+#define ERR_IN_10000_COMMON_PASSWORDS   126
 /* ------------------------------------- */
 #define ERR_MAX_USR_PASSWORD_ERROR      130
 /* ------------------------------------- */
@@ -187,10 +207,20 @@
 #endif
 
 
+#define MAX_AVATAR_SIZE                 65536   /* MySQL's BLOB size */
+
+
 #define SET_USER_STR(key, val)          silgy_usr_set_str(ci, key, val)
+#define SET_USR_STR(key, val)           silgy_usr_set_str(ci, key, val)
+
 #define GET_USER_STR(key, val)          silgy_usr_get_str(ci, key, val)
+#define GET_USR_STR(key, val)           silgy_usr_get_str(ci, key, val)
+
 #define SET_USER_INT(key, val)          silgy_usr_set_int(ci, key, val)
+#define SET_USR_INT(key, val)           silgy_usr_set_int(ci, key, val)
+
 #define GET_USER_INT(key, val)          silgy_usr_get_int(ci, key, val)
+#define GET_USR_INT(key, val)           silgy_usr_get_int(ci, key, val)
 
 
 /*
@@ -210,6 +240,8 @@
 #define FAILED_LOGIN_CNT_SIZE           100000
 #elif defined MEM_XXXLARGE
 #define FAILED_LOGIN_CNT_SIZE           100000
+#elif defined MEM_XXXXLARGE
+#define FAILED_LOGIN_CNT_SIZE           100000
 #else   /* MEM_SMALL -- default */
 #define FAILED_LOGIN_CNT_SIZE           1000
 #endif
@@ -225,26 +257,30 @@ typedef struct {
 extern "C" {
 #endif
     int  silgy_usr_login(int ci);
+    int  silgy_usr_password_quality(const char *passwd);
     int  silgy_usr_create_account(int ci);
-    int  silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email, const char *name, const char *passwd, const char *phone, const char *about, short auth_level);
+    int  silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email, const char *name, const char *passwd, const char *phone, const char *lang, const char *tz, const char *about, char group_id, char auth_level, char status);
     int  silgy_usr_send_message(int ci);
     int  silgy_usr_save_account(int ci);
     int  silgy_usr_email_registered(int ci);
-    char *silgy_usr_name(const char *login, const char *email, const char *name, long uid);
+    char *silgy_usr_name(const char *login, const char *email, const char *name, int uid);
     int  silgy_usr_send_passwd_reset_email(int ci);
-    int  silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid);
+    int  silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, int *uid);
     int  silgy_usr_activate(int ci);
+    int  silgy_usr_save_avatar(int ci, int uid);
+    int  silgy_usr_get_avatar(int ci, int uid);
     int  silgy_usr_change_password(int ci);
     int  silgy_usr_reset_password(int ci);
     void silgy_usr_logout(int ci);
     int  silgy_usr_set_str(int ci, const char *us_key, const char *us_val);
     int  silgy_usr_get_str(int ci, const char *us_key, char *us_val);
-    int  silgy_usr_set_int(int ci, const char *us_key, long us_val);
-    int  silgy_usr_get_int(int ci, const char *us_key, long *us_val);
+    int  silgy_usr_set_int(int ci, const char *us_key, int us_val);
+    int  silgy_usr_get_int(int ci, const char *us_key, int *us_val);
     /* for the engine */
     void libusr_init(void);
     int  libusr_luses_ok(int ci);
     void libusr_luses_close_timeouted(void);
+    void libusr_luses_save_csrft(void);
     void libusr_luses_downgrade(int usi, int ci, bool usr_logout);
 #ifdef __cplusplus
 }   // extern "C"

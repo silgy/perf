@@ -13,18 +13,35 @@
 #ifdef USERS
 
 
-long     G_new_user_id=0;
+int G_new_user_id=0;
+
+
+#ifdef REFUSE_10_COMMON_PASSWORDS
+    #define MAX_COMMON  10
+#elif defined REFUSE_100_COMMON_PASSWORDS
+    #define MAX_COMMON  100
+#elif defined REFUSE_1000_COMMON_PASSWORDS
+    #define MAX_COMMON  1000
+#elif defined REFUSE_10000_COMMON_PASSWORDS
+    #define MAX_COMMON  10000
+#else   /* DONT_REFUSE_COMMON_PASSWORDS */
+    #define MAX_COMMON  1
+#endif
+
+char M_common[MAX_COMMON][16]={0};
+int  M_common_cnt=0;
 
 
 static bool valid_username(const char *login);
 static bool valid_email(const char *email);
-static int  upgrade_uses(int ci, long uid, const char *login, const char *email, const char *name, const char *phone, const char *about, short auth_level);
+static int  upgrade_uses(int ci, usession_t *us);
 static int  user_exists(const char *login);
 static int  email_exists(const char *email);
-static int  do_login(int ci, long uid, char *p_login, char *p_email, char *p_name, char *p_phone, char *p_about, short p_auth_level, long visits, short status);
+static int  do_login(int ci, usession_t *us, char status, int visits);
 static void get_hashes(char *result1, char *result2, const char *login, const char *email, const char *passwd);
 static void doit(char *result1, char *result2, const char *usr, const char *email, const char *src);
-static long get_max(int ci, const char *table);
+static int  get_max(int ci, const char *table);
+static bool load_common_passwd(void);
 
 
 /* --------------------------------------------------------------------------
@@ -44,6 +61,10 @@ void libusr_init()
     silgy_add_message(ERR_EMAIL_TAKEN,              "EN-US", "This email address has already been registered");
     silgy_add_message(ERR_INVALID_PASSWORD,         "EN-US", "Please enter your existing password");
     silgy_add_message(ERR_PASSWORD_TOO_SHORT,       "EN-US", "Password must be at least %d characters long", MIN_PASSWORD_LEN);
+    silgy_add_message(ERR_IN_10_COMMON_PASSWORDS,   "EN-US", "Your password is in 10 most common passwords, which makes it too easy to guess");
+    silgy_add_message(ERR_IN_100_COMMON_PASSWORDS,  "EN-US", "Your password is in 100 most common passwords, which makes it too easy to guess");
+    silgy_add_message(ERR_IN_1000_COMMON_PASSWORDS, "EN-US", "Your password is in 1,000 most common passwords, which makes it too easy to guess");
+    silgy_add_message(ERR_IN_10000_COMMON_PASSWORDS,"EN-US", "Your password is in 10,000 most common passwords, which makes it too easy to guess");
     silgy_add_message(ERR_PASSWORD_DIFFERENT,       "EN-US", "Please retype password exactly like in the previous field");
     silgy_add_message(ERR_OLD_PASSWORD,             "EN-US", "Please enter your existing password");
     silgy_add_message(ERR_SESSION_EXPIRED,          "EN-US", "Your session has expired. Please log in to continue:");
@@ -74,6 +95,10 @@ void libusr_init()
     silgy_add_message(MSG_FEEDBACK_SENT,            "EN-US", "Thank you for your feedback!");
     silgy_add_message(MSG_USER_ALREADY_ACTIVATED,   "EN-US", "Your account has already been activated");
     silgy_add_message(MSG_ACCOUNT_DELETED,          "EN-US", "Your user account has been deleted. Thank you for trying %s!", APP_WEBSITE);
+
+#ifndef DONT_REFUSE_COMMON_PASSWORDS
+    load_common_passwd();
+#endif
 }
 
 
@@ -86,7 +111,7 @@ static bool valid_username(const char *login)
 
     for ( i=0; login[i] != EOS; ++i )
     {
-        if ( !isalnum(login[i]) && login[i] != '.' && login[i] != '_' && login[i] != '-' && login[i] != '\'' )
+        if ( !isalnum(login[i]) && login[i] != '.' && login[i] != '_' && login[i] != '-' && login[i] != '\'' && login[i] != '@' )
             return FALSE;
     }
 
@@ -124,27 +149,45 @@ static bool valid_email(const char *email)
 
 
 /* --------------------------------------------------------------------------
+   Set ls cookie expiration time
+-------------------------------------------------------------------------- */
+static void set_ls_cookie_expiration(int ci, time_t from)
+{
+    time_t sometimeahead = from + 3600*24*USER_KEEP_LOGGED_DAYS;
+    G_ptm = gmtime(&sometimeahead);
+    strftime(conn[ci].cookie_out_l_exp, 32, "%a, %d %b %Y %T GMT", G_ptm);
+    G_ptm = gmtime(&G_now);  /* make sure G_ptm is always up to date */
+}
+
+
+/* --------------------------------------------------------------------------
    Upgrade anonymous user session to logged in
 -------------------------------------------------------------------------- */
-static int upgrade_uses(int ci, long uid, const char *login, const char *email, const char *name, const char *phone, const char *about, short auth_level)
+static int upgrade_uses(int ci, usession_t *us)
 {
     DBG("upgrade_uses");
 
     DBG("Upgrading anonymous session to logged in, usi=%d, sesid [%s]", conn[ci].usi, US.sesid);
 
     US.logged = TRUE;
-    strcpy(US.login, login);
-    strcpy(US.email, email);
-    strcpy(US.name, name);
-    strcpy(US.phone, phone);
-    strcpy(US.about, about);
-    strcpy(US.login_tmp, login);
-    strcpy(US.email_tmp, email);
-    strcpy(US.name_tmp, name);
-    strcpy(US.phone_tmp, phone);
-    strcpy(US.about_tmp, about);
-    US.auth_level = auth_level;
-    US.uid = uid;
+    US.uid = us->uid;
+    strcpy(US.login, us->login);
+    strcpy(US.email, us->email);
+    strcpy(US.name, us->name);
+    strcpy(US.phone, us->phone);
+    strcpy(US.lang, us->lang);
+    strcpy(US.tz, us->tz);
+    strcpy(US.about, us->about);
+
+/*    strcpy(US.login_tmp, us->login);
+    strcpy(US.email_tmp, us->email);
+    strcpy(US.name_tmp, us->name);
+    strcpy(US.phone_tmp, us->phone);
+    strcpy(US.about_tmp, us->about); */
+
+    US.group_id = us->group_id;
+//    strcpy(US.group_name, us->group_name);
+    US.auth_level = us->auth_level;
 
 #ifndef SILGY_SVC
     if ( !silgy_app_user_login(ci) )
@@ -182,7 +225,7 @@ int libusr_luses_ok(int ci)
                 && 0==strcmp(conn[ci].cookie_in_l, uses[conn[ci].usi].sesid)
                 && 0==strcmp(conn[ci].uagent, uses[conn[ci].usi].uagent) )
         {
-            DBG("Logged in session found in cache, usi=%d, sesid [%s]", conn[ci].usi, uses[conn[ci].usi].sesid);
+            DBG("Logged in session found in cache, usi=%d, sesid [%s] (1)", conn[ci].usi, uses[conn[ci].usi].sesid);
             return OK;
         }
         else    /* session was closed */
@@ -199,7 +242,7 @@ int libusr_luses_ok(int ci)
                     && 0==strcmp(conn[ci].cookie_in_l, uses[i].sesid)
                     && 0==strcmp(conn[ci].uagent, uses[i].uagent) )
             {
-                DBG("Logged in session found in cache, usi=%d, sesid [%s]", i, uses[i].sesid);
+                DBG("Logged in session found in cache, usi=%d, sesid [%s] (2)", i, uses[i].sesid);
                 conn[ci].usi = i;
                 return OK;
             }
@@ -211,17 +254,14 @@ int libusr_luses_ok(int ci)
     char        sql[SQLBUF];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    unsigned    records;
-    long        uid;
-    time_t      created;
 
     char sanuagent[DB_UAGENT_LEN+1];
     sanitize_sql(sanuagent, conn[ci].uagent, DB_UAGENT_LEN);
 
     char sanlscookie[SESID_LEN+1];
-    sanitize_sql(sanlscookie, conn[ci].cookie_in_l, SESID_LEN);
+    strcpy(sanlscookie, silgy_filter_strict(conn[ci].cookie_in_l));
 
-    sprintf(sql, "SELECT uagent, user_id, created FROM users_logins WHERE sesid = BINARY '%s'", sanlscookie);
+    sprintf(sql, "SELECT uagent, user_id, created, csrft FROM users_logins WHERE sesid = BINARY '%s'", sanlscookie);
     DBG("sql: %s", sql);
 
     mysql_query(G_dbconn, sql);
@@ -234,11 +274,9 @@ int libusr_luses_ok(int ci)
         return ERR_INT_SERVER_ERROR;
     }
 
-    records = mysql_num_rows(result);
+    row = mysql_fetch_row(result);
 
-    DBG("users_logins: %u record(s) found", records);
-
-    if ( 0 == records )     /* no such session in database */
+    if ( !row )     /* no such session in database */
     {
         mysql_free_result(result);
         WAR("No logged in session in database [%s]", sanlscookie);
@@ -298,10 +336,6 @@ int libusr_luses_ok(int ci)
         return ERR_SESSION_EXPIRED;
     }
 
-    /* we've got some user login cookie remembered */
-
-    row = mysql_fetch_row(result);
-
     /* verify uagent */
 
     if ( 0 != strcmp(sanuagent, row[0]) )
@@ -313,13 +347,12 @@ int libusr_luses_ok(int ci)
         return ERR_SESSION_EXPIRED;
     }
 
-    /* -------------------------------------- */
+    DBG("ci=%d, sesid [%s] uagent OK", ci, sanlscookie);
 
-    uid = atol(row[1]);
-
+    /* -------------------------------------------------- */
     /* Verify time. If created more than USER_KEEP_LOGGED_DAYS ago -- refuse */
 
-    created = db2epoch(row[2]);
+    time_t created = db2epoch(row[2]);
 
     if ( created < G_now - 3600*24*USER_KEEP_LOGGED_DAYS )
     {
@@ -344,20 +377,47 @@ int libusr_luses_ok(int ci)
         return ERR_SESSION_EXPIRED;
     }
 
-    mysql_free_result(result);
+    DBG("ci=%d, sesid [%s] created not too long ago => OK", ci, sanlscookie);
 
+    /* -------------------------------------------------- */
     /* cookie has not expired -- log user in */
 
-    DBG("Logged in session found in database");
+    usession_t us={0};   /* pass user information (in this case id) over to do_login */
 
-    /* start a fresh session, keep the old sesid */
+    us.uid = atoi(row[1]);
 
-    ret = eng_uses_start(ci, sanlscookie);
+    char csrft[CSRFT_LEN+1];
 
-    if ( ret != OK )
+    if ( row[3] && row[3][0] )   /* from users_logins */
+    {
+        DBG("Using previous CSRFT [%s]", row[3]);
+        strcpy(csrft, row[3]);
+    }
+    else
+    {
+        DBG("Fresh CSRFT will be used");
+        csrft[0] = EOS;
+    }
+
+    mysql_free_result(result);
+
+    DBG("Logged in session found in database and OK");
+
+    /* -------------------------------------------------- */
+    /* start a fresh anonymous session */
+
+    if ( (ret=eng_uses_start(ci, NULL)) != OK )
         return ret;
 
-    sprintf(sql, "UPDATE users_logins SET last_used='%s' WHERE sesid = BINARY '%s'", G_dt, US.sesid);
+    if ( csrft[0] )   /* using previous CSRFT */
+        strcpy(US.csrft, csrft);
+
+    /* replace sesid */
+
+    if ( csrft[0] )
+        sprintf(sql, "UPDATE users_logins SET sesid='%s', last_used='%s' WHERE sesid = BINARY '%s'", US.sesid, DT_NOW, sanlscookie);
+    else
+        sprintf(sql, "UPDATE users_logins SET sesid='%s', csrft='%s', last_used='%s' WHERE sesid = BINARY '%s'", US.sesid, US.csrft, DT_NOW, sanlscookie);
     DBG("sql: %s", sql);
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -365,7 +425,15 @@ int libusr_luses_ok(int ci)
         return ERR_INT_SERVER_ERROR;
     }
 
-    return do_login(ci, uid, NULL, NULL, NULL, NULL, NULL, 0, 0, 0);
+    /* set cookie */
+
+    strcpy(conn[ci].cookie_out_l, US.sesid);
+
+    set_ls_cookie_expiration(ci, created);
+
+    /* upgrade uses */
+
+    return do_login(ci, &us, 100, 0);
 }
 
 
@@ -383,6 +451,33 @@ void libusr_luses_close_timeouted()
     {
         if ( uses[i].sesid[0] && uses[i].logged && uses[i].last_activity < last_allowed )
             libusr_luses_downgrade(i, NOT_CONNECTED, FALSE);
+    }
+}
+
+
+/* --------------------------------------------------------------------------
+   Save open, logged in sessions' CSRF tokens
+-------------------------------------------------------------------------- */
+void libusr_luses_save_csrft()
+{
+    int  i;
+    char sql[SQLBUF];
+
+    DBG("libusr_luses_save_csrft");
+
+    int sessions = G_sessions;
+
+    for ( i=1; sessions>0 && i<=MAX_SESSIONS; ++i )
+    {
+        if ( uses[i].sesid[0] && uses[i].logged )
+        {
+            sprintf(sql, "UPDATE users_logins SET csrft='%s' WHERE sesid = BINARY '%s'", uses[i].csrft, uses[i].sesid);
+            DBG("sql: %s", sql);
+            if ( mysql_query(G_dbconn, sql) )
+                ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+
+            sessions--;
+        }
     }
 }
 #endif  /* SILGY_SVC */
@@ -405,12 +500,15 @@ void libusr_luses_downgrade(int usi, int ci, bool usr_logout)
     uses[usi].email[0] = EOS;
     uses[usi].name[0] = EOS;
     uses[usi].phone[0] = EOS;
+
+    if ( ci != NOT_CONNECTED )   /* still connected */
+        strcpy(uses[usi].lang, conn[ci].lang);
+    else
+        uses[usi].lang[0] = EOS;
+
+    uses[usi].tz[0] = EOS;
     uses[usi].about[0] = EOS;
-    uses[usi].login_tmp[0] = EOS;
-    uses[usi].email_tmp[0] = EOS;
-    uses[usi].name_tmp[0] = EOS;
-    uses[usi].phone_tmp[0] = EOS;
-    uses[usi].about_tmp[0] = EOS;
+    uses[usi].group_id = 0;
     uses[usi].auth_level = AUTH_LEVEL_ANONYMOUS;
 
 #ifndef SILGY_SVC
@@ -440,6 +538,16 @@ void libusr_luses_downgrade(int usi, int ci, bool usr_logout)
             strcpy(conn[ci].cookie_out_a, uses[usi].sesid);
         }
     }
+    else    /* timeout */
+    {
+        sprintf(sql, "UPDATE users_logins SET csrft='%s' WHERE sesid = BINARY '%s'", uses[usi].csrft, uses[usi].sesid);
+        DBG("sql: %s", sql);
+        if ( mysql_query(G_dbconn, sql) )
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+    }
+#ifndef DONT_RESET_AUSES_ON_LOGOUT
+    memset(&auses[usi], 0, sizeof(ausession_t));
+#endif
 }
 
 
@@ -472,8 +580,6 @@ static int user_exists(const char *login)
     }
 
     records = mysql_num_rows(result);
-
-    DBG("users: %u record(s) found", records);
 
     mysql_free_result(result);
 
@@ -511,8 +617,6 @@ static int email_exists(const char *email)
 
     records = mysql_num_rows(result);
 
-    DBG("users: %u record(s) found", records);
-
     mysql_free_result(result);
 
     if ( 0 != records )
@@ -524,29 +628,24 @@ static int email_exists(const char *email)
 
 /* --------------------------------------------------------------------------
    Log user in -- called either by l_usession_ok or silgy_usr_login
-   Authentication has already been done prior to calling this
+   Authentication has already been done prior to calling this.
+   Connection (conn[ci]) has to have an anonymous session.
+   us serves here to pass user information
 -------------------------------------------------------------------------- */
-static int do_login(int ci, long uid, char *p_login, char *p_email, char *p_name, char *p_phone, char *p_about, short p_auth_level, long visits, short status)
+static int do_login(int ci, usession_t *us, char status, int visits)
 {
-    int         ret=OK;
+    int         ret;
     char        sql[SQLBUF];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    unsigned    records;
-    char        login[LOGIN_LEN+1];
-    char        email[EMAIL_LEN+1];
-    char        name[UNAME_LEN+1];
-    char        phone[PHONE_LEN+1];
-    char        about[ABOUT_LEN+1];
-    short       auth_level;
 
     DBG("do_login");
 
-    /* get user record by id */
+    UID = us->uid;
 
-    if ( !p_login )   /* login from cookie */
+    if ( status == 100 )    /* login from cookie -- we only have a user id from users_logins */
     {
-        sprintf(sql, "SELECT login,email,name,phone,about,auth_level,visits FROM users WHERE id=%ld", uid);
+        sprintf(sql, "SELECT login,email,name,phone,lang,tz,about,group_id,auth_level,status,visits FROM users WHERE id=%d", UID);
         DBG("sql: %s", sql);
         mysql_query(G_dbconn, sql);
         result = mysql_store_result(G_dbconn);
@@ -556,50 +655,75 @@ static int do_login(int ci, long uid, char *p_login, char *p_email, char *p_name
             return ERR_INT_SERVER_ERROR;
         }
 
-        records = mysql_num_rows(result);
+        row = mysql_fetch_row(result);
 
-        DBG("users: %u record(s) found", records);
-
-        if ( 0 == records )
+        if ( !row )    /* this should never happen */
         {
             mysql_free_result(result);
-            WAR("Cookie sesid does not match user id");
+            ERR("Cookie sesid [%s] does not match user id=%d", US.sesid, UID);
             return ERR_INVALID_LOGIN;   /* invalid user and/or password */
         }
 
-        /* user found */
+        strcpy(US.login, row[0]?row[0]:"");
+        strcpy(US.email, row[1]?row[1]:"");
+        strcpy(US.name, row[2]?row[2]:"");
+        strcpy(US.phone, row[3]?row[3]:"");
+        strcpy(US.lang, row[4]?row[4]:"");
+        strcpy(US.tz, row[5]?row[5]:"");
+        strcpy(US.about, row[6]?row[6]:"");
+        US.group_id = row[7]?atoi(row[7]):0;
+        US.auth_level = row[8]?atoi(row[8]):DEF_USER_AUTH_LEVEL;
 
-        row = mysql_fetch_row(result);
+        /* non-session data */
 
-        strcpy(login, row[0]?row[0]:"");
-        strcpy(email, row[1]?row[1]:"");
-        strcpy(name, row[2]?row[2]:"");
-        strcpy(phone, row[3]?row[3]:"");
-        strcpy(about, row[4]?row[4]:"");
-        auth_level = row[5]?atoi(row[5]):DEF_USER_AUTH_LEVEL;
-        visits = atol(row[6]);
+        status = row[9]?atoi(row[9]):USER_STATUS_ACTIVE;
+        visits = row[10]?atoi(row[10]):0;
 
         mysql_free_result(result);
     }
-    else
+    else    /* called by silgy_usr_login -- user data already read from users */
     {
-        strcpy(login, p_login);
-        strcpy(email, p_email);
-        strcpy(name, p_name);
-        strcpy(phone, p_phone);
-        strcpy(about, p_about);
-        auth_level = p_auth_level;
+        strcpy(US.login, us->login);
+        strcpy(US.email, us->email);
+        strcpy(US.name, us->name);
+        strcpy(US.phone, us->phone);
+        strcpy(US.lang, us->lang);
+        strcpy(US.tz, us->tz);
+        strcpy(US.about, us->about);
+        US.group_id = us->group_id;
+        US.auth_level = us->auth_level;
+    }
+
+    if ( US.group_id > 0 )    /* auth_level inherited from a group */
+    {
+        sprintf(sql, "SELECT name,about,auth_level FROM users_groups WHERE id=%d", US.group_id);
+        DBG("sql: %s", sql);
+        mysql_query(G_dbconn, sql);
+        result = mysql_store_result(G_dbconn);
+        if ( !result )
+        {
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            return ERR_INT_SERVER_ERROR;
+        }
+
+        row = mysql_fetch_row(result);
+
+        if ( row )
+            US.auth_level = row[2]?atoi(row[2]):DEF_USER_AUTH_LEVEL;
+        else
+            WAR("group_id=%d not found in users_groups", US.group_id);
+
+        mysql_free_result(result);
     }
 
     /* upgrade anonymous session to logged in */
 
-    ret = upgrade_uses(ci, uid, login, email, name, phone, about, auth_level);
-    if ( ret != OK )
+    if ( (ret=upgrade_uses(ci, &US)) != OK )
         return ret;
 
     /* update user record */
 
-    sprintf(sql, "UPDATE users SET visits=%ld, last_login='%s' WHERE id=%ld", visits+1, G_dt, uid);
+    sprintf(sql, "UPDATE users SET visits=%d, last_login='%s' WHERE id=%d", visits+1, DT_NOW, UID);
     DBG("sql: %s", sql);
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -621,14 +745,14 @@ static int do_login(int ci, long uid, char *p_login, char *p_email, char *p_name
         return WAR_PASSWORD_CHANGE;
     }
 
-    return ret;
+    return OK;
 }
 
 
 /* --------------------------------------------------------------------------
    Send activation link
 -------------------------------------------------------------------------- */
-static int send_activation_link(int ci, const char *login, const char *email)
+static int send_activation_link(int ci, int uid, const char *email)
 {
     char linkkey[PASSWD_RESET_KEY_LEN+1];
     char sql[SQLBUF];
@@ -637,7 +761,7 @@ static int send_activation_link(int ci, const char *login, const char *email)
 
     silgy_random(linkkey, PASSWD_RESET_KEY_LEN);
 
-    sprintf(sql, "INSERT INTO users_activations (linkkey,user_id,created,activated) VALUES ('%s',%ld,'%s','N')", linkkey, US.uid, G_dt);
+    sprintf(sql, "INSERT INTO users_activations (linkkey,user_id,created,activated) VALUES ('%s',%d,'%s','%s')", linkkey, uid, DT_NOW, DT_NULL);
     DBG("sql: %s", sql);
 
     if ( mysql_query(G_dbconn, sql) )
@@ -650,35 +774,28 @@ static int send_activation_link(int ci, const char *login, const char *email)
 
     char subject[256];
     char message[4096];
-    char tmp[1024];
-    char *p=message;
 
-    sprintf(tmp, "Dear %s,\n\n", silgy_usr_name(NULL, NULL, NULL, UID));
-    p = stpcpy(p, tmp);
-    sprintf(tmp, "Welcome to %s! Your account requires activation. Please visit this URL to activate your account:\n\n", conn[ci].website);
-    p = stpcpy(p, tmp);
+    OUTP_BEGIN(message);
 
+    OUTP("Dear %s,\n\n", silgy_usr_name(NULL, NULL, NULL, uid));
+    OUTP("Welcome to %s! Your account requires activation. Please visit this URL to activate your account:\n\n", conn[ci].website);
 #ifdef HTTPS
     if ( G_test )
-        sprintf(tmp, "http://%s/activate_acc?k=%s\n\n", conn[ci].host, linkkey);
+        OUTP("http://%s/activate_acc?k=%s\n\n", conn[ci].host, linkkey);
     else
-        sprintf(tmp, "https://%s/activate_acc?k=%s\n\n", conn[ci].host, linkkey);
+        OUTP("https://%s/activate_acc?k=%s\n\n", conn[ci].host, linkkey);
 #else
-    sprintf(tmp, "http://%s/activate_acc?k=%s\n\n", conn[ci].host, linkkey);
+    OUTP("http://%s/activate_acc?k=%s\n\n", conn[ci].host, linkkey);
 #endif  /* HTTPS */
-    p = stpcpy(p, tmp);
-
-    sprintf(tmp, "Please keep in mind that this link will only be valid for the next %d hours.\n\n", USER_ACTIVATION_HOURS);
-    p = stpcpy(p, tmp);
-    p = stpcpy(p, "If you did this by mistake or it wasn't you, you can safely ignore this email.\n\n");
+    OUTP("Please keep in mind that this link will only be valid for the next %d hours.\n\n", USER_ACTIVATION_HOURS);
+    OUTP("If you did this by mistake or it wasn't you, you can safely ignore this email.\n\n");
 #ifdef APP_CONTACT_EMAIL
-    sprintf(tmp, "In case you needed any help, please contact us at %s.\n\n", APP_CONTACT_EMAIL);
-    p = stpcpy(p, tmp);
+    OUTP("In case you needed any help, please contact us at %s.\n\n", APP_CONTACT_EMAIL);
 #endif
-    p = stpcpy(p, "Kind Regards\n");
+    OUTP("Kind Regards\n");
+    OUTP("%s\n", conn[ci].website);
 
-    sprintf(tmp, "%s\n", conn[ci].website);
-    p = stpcpy(p, tmp);
+    OUTP_END;
 
     sprintf(subject, "%s Account Activation", conn[ci].website);
 
@@ -692,12 +809,11 @@ static int send_activation_link(int ci, const char *login, const char *email)
 /* --------------------------------------------------------------------------
    Verify activation key
 -------------------------------------------------------------------------- */
-static int silgy_usr_verify_activation_key(int ci, char *linkkey, long *uid)
+static int silgy_usr_verify_activation_key(int ci, char *linkkey, int *uid)
 {
     char        sql[SQLBUF];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    unsigned    records;
     QSVAL       esc_linkkey;
 
     DBG("silgy_usr_verify_activation_key");
@@ -720,21 +836,17 @@ static int silgy_usr_verify_activation_key(int ci, char *linkkey, long *uid)
         return ERR_INT_SERVER_ERROR;
     }
 
-    records = mysql_num_rows(result);
+    row = mysql_fetch_row(result);
 
-    DBG("users_activations: %u row(s) found", records);
-
-    if ( !records )     /* no records with this key in users_activations -- link broken? */
+    if ( !row )     /* no records with this key in users_activations -- link broken? */
     {
         mysql_free_result(result);
         return ERR_LINK_MAY_BE_EXPIRED;
     }
 
-    row = mysql_fetch_row(result);
-
     /* already activated? */
 
-    if ( row[2] && row[2][0]=='Y' )
+    if ( row[2] && 0!=strcmp(row[2], DT_NULL) )
     {
         mysql_free_result(result);
         DBG("User already activated");
@@ -754,11 +866,11 @@ static int silgy_usr_verify_activation_key(int ci, char *linkkey, long *uid)
 
     /* get the user id */
 
-    *uid = atol(row[0]);
+    *uid = atoi(row[0]);
 
     mysql_free_result(result);
 
-    DBG("Key ok, uid = %ld", *uid);
+    DBG("Key ok, uid = %d", *uid);
 
     return OK;
 }
@@ -782,36 +894,26 @@ static int silgy_usr_verify_activation_key(int ci, char *linkkey, long *uid)
 int silgy_usr_login(int ci)
 {
     int         ret=OK;
+
     QSVAL       login;
     QSVAL       email;
-    char        name[UNAME_LEN+1];
-    char        phone[PHONE_LEN+1];
-    char        about[ABOUT_LEN+1];
-    short       auth_level;
-    short       status;
     QSVAL       passwd;
     QSVAL       keep;
-    char        ulogin[MAX_VALUE_LEN*2+1];
+
     char        sql[SQLBUF];
-    char        p1[32], p2[32];
-    char        str1[32], str2[32];
-    int         ula_cnt;
-    char        ula_time[32];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    unsigned    records;
-    long        uid;
+    char        p1[32], p2[32];
+    char        str1[32], str2[32];
+    char        status;
+    int         visits;
+    int         ula_cnt;
+    char        ula_time[32];
     int         new_ula_cnt;
-    long        visits;
+
+    usession_t  us={0};    /* pass user information over to do_login */
 
     DBG("silgy_usr_login");
-
-//#ifdef SILGY_SVC
-
-//    ERR("silgy_usr_login() is not currently supported in silgy_svc. Move this call do silgy_app.");
-//    return ERR_INT_SERVER_ERROR;
-
-//#else
 
 #ifdef USERSBYEMAIL
 
@@ -821,7 +923,7 @@ int silgy_usr_login(int ci)
         return ERR_INVALID_REQUEST;
     }
     stp_right(email);
-    sprintf(sql, "SELECT id,login,email,name,phone,passwd1,passwd2,about,auth_level,status,ula_time,ula_cnt,visits FROM users WHERE email_u='%s'", upper(email));
+    sprintf(sql, "SELECT id,login,email,name,phone,passwd1,passwd2,lang,tz,about,group_id,auth_level,status,visits,ula_cnt,ula_time FROM users WHERE email_u='%s'", upper(email));
 
 #else    /* by login */
 
@@ -831,8 +933,9 @@ int silgy_usr_login(int ci)
         return ERR_INVALID_REQUEST;
     }
     stp_right(login);
+    QSVAL ulogin;
     strcpy(ulogin, upper(login));
-    sprintf(sql, "SELECT id,login,email,name,phone,passwd1,passwd2,about,auth_level,status,ula_time,ula_cnt,visits FROM users WHERE (login_u='%s' OR email_u='%s')", ulogin, ulogin);
+    sprintf(sql, "SELECT id,login,email,name,phone,passwd1,passwd2,lang,tz,about,group_id,auth_level,status,visits,ula_cnt,ula_time FROM users WHERE login_u='%s' OR email_u='%s'", ulogin, ulogin);
 
 #endif  /* USERSBYEMAIL */
 
@@ -848,33 +951,35 @@ int silgy_usr_login(int ci)
         return ERR_INT_SERVER_ERROR;
     }
 
-    records = mysql_num_rows(result);
+    row = mysql_fetch_row(result);
 
-    DBG("users: %u record(s) found", records);
-
-    if ( 0 == records )     /* no records */
+    if ( !row )     /* no records */
     {
         mysql_free_result(result);
         return ERR_INVALID_LOGIN;   /* invalid user and/or password */
     }
 
-    /* user name found */
+    /* login/email found */
 
-    row = mysql_fetch_row(result);
+    us.uid = atoi(row[0]);
+    strcpy(us.login, row[1]?row[1]:"");
+    strcpy(us.email, row[2]?row[2]:"");
+    strcpy(us.name, row[3]?row[3]:"");
+    strcpy(us.phone, row[4]?row[4]:"");
+    strcpy(us.lang, row[7]?row[7]:"");
+    strcpy(us.tz, row[8]?row[8]:"");
+    strcpy(us.about, row[9]?row[9]:"");
+    us.group_id = row[10]?atoi(row[10]):0;
+    us.auth_level = row[11]?atoi(row[11]):DEF_USER_AUTH_LEVEL;
 
-    uid = atol(row[0]);
-    strcpy(login, row[1]?row[1]:"");
-    strcpy(email, row[2]?row[2]:"");
-    strcpy(name, row[3]?row[3]:"");
-    strcpy(phone, row[4]?row[4]:"");
-    strcpy(p1, row[5]);
-    strcpy(p2, row[6]);
-    strcpy(about, row[7]?row[7]:"");
-    auth_level = row[8]?atoi(row[8]):DEF_USER_AUTH_LEVEL;
-    status = row[9]?atoi(row[9]):USER_STATUS_ACTIVE;
-    strcpy(ula_time, row[10]?row[10]:"");
-    ula_cnt = atoi(row[11]);
-    visits = atol(row[12]);
+    /* non-session data */
+
+    strcpy(p1, row[5]?row[5]:"");
+    strcpy(p2, row[6]?row[6]:"");
+    status = row[12]?atoi(row[12]):USER_STATUS_ACTIVE;
+    visits = row[13]?atoi(row[13]):0;
+    ula_cnt = row[14]?atoi(row[14]):0;
+    strcpy(ula_time, row[15]?row[15]:DT_NULL);
 
     mysql_free_result(result);
 
@@ -902,34 +1007,31 @@ int silgy_usr_login(int ci)
         {
             WAR("ula_cnt > MAX_ULA_BEFORE_LOCK (%d) => locking user account", MAX_ULA_BEFORE_LOCK);
 
-            sprintf(sql, "UPDATE users SET status=%d WHERE id=%ld", USER_STATUS_LOCKED, uid);
+            sprintf(sql, "UPDATE users SET status=%d WHERE id=%d", USER_STATUS_LOCKED, us.uid);
             DBG("sql: %s", sql);
             if ( mysql_query(G_dbconn, sql) )
                 ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
 
-            if ( email[0] )   /* notify account owner */
+            if ( us.email[0] )   /* notify account owner */
             {
                 char subject[256];
                 char message[4096];
-                char tmp[1024];
-                char *p=message;
 
-                sprintf(tmp, "Dear %s,\n\n", silgy_usr_name(login, email, name, 0));
-                p = stpcpy(p, tmp);
-                sprintf(tmp, "Someone has tried to log in to your %s account unsuccessfully more than %d times. To protect it from brute-force attack your account has been locked.\n\n", conn[ci].website, MAX_ULA_BEFORE_LOCK);
-                p = stpcpy(p, tmp);
+                OUTP_BEGIN(message);
+
+                OUTP("Dear %s,\n\n", silgy_usr_name(us.login, us.email, us.name, 0));
+                OUTP("Someone has tried to log in to your %s account unsuccessfully more than %d times. To protect it from brute-force attack your account has been locked.\n\n", conn[ci].website, MAX_ULA_BEFORE_LOCK);
 #ifdef APP_CONTACT_EMAIL
-                sprintf(tmp, "Please contact us at %s.\n\n", APP_CONTACT_EMAIL);
-                p = stpcpy(p, tmp);
+                OUTP("Please contact us at %s.\n\n", APP_CONTACT_EMAIL);
 #endif
-                p = stpcpy(p, "Kind Regards\n");
+                OUTP("Kind Regards\n");
+                OUTP("%s\n", conn[ci].website);
 
-                sprintf(tmp, "%s\n", conn[ci].website);
-                p = stpcpy(p, tmp);
+                OUTP_END;
 
                 sprintf(subject, "%s account locked", conn[ci].website);
 
-                silgy_email(email, subject, message);
+                silgy_email(us.email, subject, message);
             }
 
             return ERR_INVALID_LOGIN;
@@ -967,15 +1069,17 @@ int silgy_usr_login(int ci)
 
     /* now check username/email and password pairs as they should be */
 
-    get_hashes(str1, str2, login, email, passwd);
+    /* generate hashes using entered password */
 
-    /* are these as expected? */
+    get_hashes(str1, str2, us.login, us.email, passwd);
 
-    if ( 0 != strcmp(str1, p1) || (email[0] && 0 != strcmp(str2, p2)) )  /* passwd1, passwd2 */
+    /* compare them with the stored ones */
+
+    if ( 0 != strcmp(str1, p1) || (us.email[0] && 0 != strcmp(str2, p2)) )   /* passwd1, passwd2 */
     {
-        DBG("Invalid password");
+        WAR("Invalid password");
         new_ula_cnt = ula_cnt + 1;
-        sprintf(sql, "UPDATE users SET ula_cnt=%d, ula_time='%s' WHERE id=%ld", new_ula_cnt, G_dt, uid);
+        sprintf(sql, "UPDATE users SET ula_cnt=%d, ula_time='%s' WHERE id=%d", new_ula_cnt, DT_NOW, us.uid);
         DBG("sql: %s", sql);
         if ( mysql_query(G_dbconn, sql) )
         {
@@ -1002,7 +1106,7 @@ int silgy_usr_login(int ci)
     if ( ula_cnt )   /* clear it */
     {
         DBG("Clearing ula_cnt");
-        sprintf(sql, "UPDATE users SET ula_cnt=0 WHERE id=%ld", uid);
+        sprintf(sql, "UPDATE users SET ula_cnt=0 WHERE id=%d", us.uid);
         DBG("sql: %s", sql);
         if ( mysql_query(G_dbconn, sql) )
         {
@@ -1011,16 +1115,18 @@ int silgy_usr_login(int ci)
         }
     }
 
-    /* try to use anonymous sesid if present */
+    /* use anonymous session if present but refresh sesid  */
 
     if ( conn[ci].usi )
     {
-        DBG("Using current session usi=%d, sesid [%s]", conn[ci].usi, US.sesid);
+        silgy_random(US.sesid, SESID_LEN);
+        DBG("Using current session usi=%d, generated new sesid [%s]", conn[ci].usi, US.sesid);
     }
     else    /* no session --> start a new one */
     {
-        ret = eng_uses_start(ci, NULL);
-        if ( ret != OK )
+        DBG("No session, starting new");
+
+        if ( (ret=eng_uses_start(ci, NULL)) != OK )
             return ret;
     }
 
@@ -1031,7 +1137,7 @@ int silgy_usr_login(int ci)
     char sanuagent[DB_UAGENT_LEN+1];
     sanitize_sql(sanuagent, conn[ci].uagent, DB_UAGENT_LEN);
 
-    sprintf(sql, "INSERT INTO users_logins (sesid,uagent,ip,user_id,created,last_used) VALUES ('%s','%s','%s',%ld,'%s','%s')", US.sesid, sanuagent, conn[ci].ip, uid, G_dt, G_dt);
+    sprintf(sql, "INSERT INTO users_logins (sesid,uagent,ip,user_id,csrft,created,last_used) VALUES ('%s','%s','%s',%d,'%s','%s','%s')", US.sesid, sanuagent, conn[ci].ip, us.uid, US.csrft, DT_NOW, DT_NOW);
     DBG("sql: %s", sql);
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -1051,36 +1157,145 @@ int silgy_usr_login(int ci)
     if ( QS_HTML_ESCAPE("keep", keep) && 0==strcmp(keep, "on") )
     {
         DBG("keep is ON");
-        time_t sometimeahead = G_now + 3600*24*USER_KEEP_LOGGED_DAYS;
-        G_ptm = gmtime(&sometimeahead);
-        strftime(conn[ci].cookie_out_l_exp, 32, "%a, %d %b %Y %T GMT", G_ptm);
-        G_ptm = gmtime(&G_now);  /* make sure G_ptm is always up to date */
+        set_ls_cookie_expiration(ci, G_now);
     }
 
-    /* finish logging user in */
+    /* upgrade uses */
 
-    return do_login(ci, uid, login, email, name, phone, about, auth_level, visits, status);
-
-//#endif  /* SILGY_SVC */
+    return do_login(ci, &us, status, visits);
 }
 
 
 /* --------------------------------------------------------------------------
-   Create user account
+   Load common passwords list from a file
+   Initial list obtained from:
+   https://github.com/danielmiessler/SecLists/blob/master/Passwords/Common-Credentials/10k-most-common.txt
 -------------------------------------------------------------------------- */
-static int create_account(int ci, short auth_level, short status, bool current_session)
+static bool load_common_passwd()
+{
+    char    fname[1024];
+    FILE    *h_file=NULL;
+    char    c;
+    int     i=0;
+    char    value[16];
+
+    INF("Loading common passwords list");
+
+    /* open the file */
+
+    if ( G_appdir[0] )
+        sprintf(fname, "%s/bin/%s", G_appdir, COMMON_PASSWORDS_FILE);
+    else
+        strcpy(fname, COMMON_PASSWORDS_FILE);
+
+    if ( NULL == (h_file=fopen(fname, "r")) )
+    {
+        WAR("Couldn't open %s\n", fname);
+        return FALSE;
+    }
+
+    M_common_cnt = 0;
+
+    /* parse the file */
+
+    while ( EOF != (c=fgetc(h_file)) )
+    {
+        if ( c == ' ' || c == '\t' || c == '\r' ) continue;   /* omit whitespaces */
+
+        if ( c == '\n' )    /* end of value */
+        {
+            if ( i )   /* non-empty value */
+            {
+                value[i] = EOS;
+                i = 0;
+                strcpy(M_common[M_common_cnt++], value);
+                if ( M_common_cnt == MAX_COMMON ) break;
+            }
+        }
+        else
+        {
+            if ( i < 15 )
+                value[i++] = c;
+        }
+    }
+
+    if ( i )   /* end of value */
+    {
+        value[i] = EOS;
+        strcpy(M_common[M_common_cnt++], value);
+    }
+
+    if ( NULL != h_file )
+        fclose(h_file);
+
+    ALWAYS("%d common passwords", M_common_cnt);
+
+    /* show the list */
+
+#ifdef DUMP
+    DBG("");
+    for ( i=0; i<M_common_cnt; ++i )
+        DBG("[%s]", M_common[i]);
+    DBG("");
+#endif
+
+    return TRUE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Assess password quality
+-------------------------------------------------------------------------- */
+int silgy_usr_password_quality(const char *passwd)
+{
+    int len = strlen(passwd);
+
+    if ( len < MIN_PASSWORD_LEN )
+        return ERR_PASSWORD_TOO_SHORT;
+
+#ifndef DONT_REFUSE_COMMON_PASSWORDS
+
+    int i;
+
+    for ( i=0; i<M_common_cnt; ++i )
+    {
+        if ( 0==strcmp(M_common[i], passwd) )
+#ifdef REFUSE_100_COMMON_PASSWORDS
+            return ERR_IN_100_COMMON_PASSWORDS;
+#elif defined REFUSE_1000_COMMON_PASSWORDS
+            return ERR_IN_1000_COMMON_PASSWORDS;
+#elif defined REFUSE_10000_COMMON_PASSWORDS
+            return ERR_IN_10000_COMMON_PASSWORDS;
+#else
+            return ERR_IN_10_COMMON_PASSWORDS;
+#endif
+    }
+
+#endif  /* DONT_REFUSE_COMMON_PASSWORDS */
+
+    return OK;
+}
+
+
+/* --------------------------------------------------------------------------
+   Create user account using query string values
+-------------------------------------------------------------------------- */
+static int create_account(int ci, char auth_level, char status, bool current_session)
 {
     int     ret=OK;
-    QSVAL   login="";
-    QSVAL   login_u;
-    QSVAL   email="";
-    QSVAL   email_u;
-    QSVAL   name="";
-    QSVAL   phone="";
-    QSVAL   about="";
+    QSVAL   tmp;
+    char    login[LOGIN_LEN+1];
+    char    login_u[LOGIN_LEN+1];
+    char    email[EMAIL_LEN+1];
+    char    email_u[EMAIL_LEN+1];
+    char    name[UNAME_LEN+1];
+    char    phone[PHONE_LEN+1];
+    QSVAL   lang;
+    QSVAL   tz;
+    char    about[ABOUT_LEN+1];
     QSVAL   passwd;
     QSVAL   rpasswd;
-    QSVAL   message="";
+    QSVAL   message;
     char    sql[SQLBUF];
     char    str1[32], str2[32];
 
@@ -1088,19 +1303,23 @@ static int create_account(int ci, short auth_level, short status, bool current_s
 
     /* get the basics */
 
-    if ( QS_HTML_ESCAPE("login", login) )
+    if ( QS_HTML_ESCAPE("login", tmp) )
     {
-        login[LOGIN_LEN] = EOS;
+        COPY(login, tmp, LOGIN_LEN);
         stp_right(login);
         if ( current_session && conn[ci].usi ) strcpy(US.login, login);
     }
+    else
+        login[0] = EOS;
 
-    if ( QS_HTML_ESCAPE("email", email) )
+    if ( QS_HTML_ESCAPE("email", tmp) )
     {
-        email[EMAIL_LEN] = EOS;
+        COPY(email, tmp, EMAIL_LEN);
         stp_right(email);
         if ( current_session && conn[ci].usi ) strcpy(US.email, email);
     }
+    else
+        email[0] = EOS;
 
     /* basic verification */
 
@@ -1115,10 +1334,15 @@ static int create_account(int ci, short auth_level, short status, bool current_s
     if ( !login[0] )    /* login empty */
     {
 #ifdef USERSBYEMAIL
-        strcpy(login, email);
-#else
-        ERR("Invalid request (login missing)");
-        return ERR_INVALID_REQUEST;
+        COPY(login, email, LOGIN_LEN);
+#else   /* USERSBYLOGIN */
+        if ( email[0] )
+            COPY(login, email, LOGIN_LEN);
+        else
+        {
+            ERR("Invalid request (login missing)");
+            return ERR_INVALID_REQUEST;
+        }
 #endif
     }
 
@@ -1139,26 +1363,53 @@ static int create_account(int ci, short auth_level, short status, bool current_s
 
     /* optional */
 
-    if ( QS_HTML_ESCAPE("name", name) )
+    if ( QS_HTML_ESCAPE("name", tmp) )
     {
-        name[UNAME_LEN] = EOS;
+        COPY(name, tmp, UNAME_LEN);
         stp_right(name);
         if ( current_session && conn[ci].usi ) strcpy(US.name, name);
     }
+    else
+        name[0] = EOS;
 
-    if ( QS_HTML_ESCAPE("phone", phone) )
+    if ( QS_HTML_ESCAPE("phone", tmp) )
     {
-        phone[PHONE_LEN] = EOS;
+        COPY(phone, tmp, PHONE_LEN);
         stp_right(phone);
         if ( current_session && conn[ci].usi ) strcpy(US.phone, phone);
     }
+    else
+        phone[0] = EOS;
 
-    if ( QS_HTML_ESCAPE("about", about) )
+    if ( QS_HTML_ESCAPE("lang", lang) )
     {
-        about[ABOUT_LEN] = EOS;
+        lang[LANG_LEN] = EOS;
+        stp_right(lang);
+    }
+    else
+        lang[0] = EOS;
+
+    if ( !lang[0] ) strcpy(lang, conn[ci].lang);    /* use current request lang if empty */
+
+    if ( current_session && conn[ci].usi ) strcpy(US.lang, lang);
+
+    if ( QS_HTML_ESCAPE("tz", tz) )
+    {
+        tz[5] = EOS;
+        stp_right(tz);
+        if ( current_session && conn[ci].usi ) strcpy(US.tz, tz);
+    }
+    else
+        tz[0] = EOS;
+
+    if ( QS_HTML_ESCAPE("about", tmp) )
+    {
+        COPY(about, tmp, ABOUT_LEN);
         stp_right(about);
         if ( current_session && conn[ci].usi ) strcpy(US.about, about);
     }
+    else
+        about[0] = EOS;
 
     /* ----------------------------------------------------------------- */
 
@@ -1185,8 +1436,8 @@ static int create_account(int ci, short auth_level, short status, bool current_s
 
     if ( email[0] && OK != (ret=email_exists(email)) )  /* email in use */
         return ret;
-    else if ( plen < MIN_PASSWORD_LEN )                 /* password too short */
-        return ERR_PASSWORD_TOO_SHORT;
+    else if ( (ret=silgy_usr_password_quality(passwd)) != OK )
+        return ret;
     else if ( 0 != strcmp(passwd, rpasswd) )            /* passwords differ */
         return ERR_PASSWORD_DIFFERENT;
 
@@ -1197,7 +1448,7 @@ static int create_account(int ci, short auth_level, short status, bool current_s
     strcpy(login_u, upper(login));
     strcpy(email_u, upper(email));
 
-    sprintf(sql, "INSERT INTO users (id,login,login_u,email,email_u,name,phone,passwd1,passwd2,about,auth_level,status,created,visits,ula_cnt) VALUES (0,'%s','%s','%s','%s','%s','%s','%s','%s','%s',%hd,%hd,'%s',0,0)", login, login_u, email, email_u, name, phone, str1, str2, about, auth_level, status, G_dt);
+    sprintf(sql, "INSERT INTO users (id,login,login_u,email,email_u,name,phone,passwd1,passwd2,lang,tz,about,auth_level,status,created,visits,ula_cnt) VALUES (0,'%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s',%d,%d,'%s',0,0)", login, login_u, email, email_u, name, phone, str1, str2, lang, tz, about, auth_level, status, DT_NOW);
 
     DBG("sql: INSERT INTO users (id,login,email,name,phone,...) VALUES (0,'%s','%s','%s','%s',...)", login, email, name, phone);
 
@@ -1210,18 +1461,18 @@ static int create_account(int ci, short auth_level, short status, bool current_s
     G_new_user_id = mysql_insert_id(G_dbconn);
 
     if ( current_session )
-        US.uid = G_new_user_id;
+        UID = G_new_user_id;
 
     if ( G_usersRequireAccountActivation )
     {
-        if ( (ret=send_activation_link(ci, login, email)) != OK )
+        if ( (ret=send_activation_link(ci, G_new_user_id, email)) != OK )
             return ret;
     }
 
 #ifdef USERSBYEMAIL
-    INF("User [%s] created", email);
+    INF("User [%s] created from %s", email, US.ip);
 #else
-    INF("User [%s] created", login);
+    INF("User [%s] created from %s", login, US.ip);
 #endif
 
     return OK;
@@ -1236,7 +1487,7 @@ int silgy_usr_create_account(int ci)
 {
     DBG("silgy_usr_create_account");
 
-    short status;
+    char status;
 
     if ( G_usersRequireAccountActivation )
         status = USER_STATUS_INACTIVE;
@@ -1250,38 +1501,33 @@ int silgy_usr_create_account(int ci)
 /* --------------------------------------------------------------------------
    Send an email about new account
 -------------------------------------------------------------------------- */
-static int new_account_notification(int ci, const char *login, const char *email, const char *name, const char *passwd)
+static int new_account_notification(int ci, const char *login, const char *email, const char *name, const char *passwd, char status)
 {
     char subject[256];
     char message[4096];
-    char tmp[1024];
-    char *p=message;
 
-    sprintf(tmp, "Dear %s,\n\n", silgy_usr_name(login, email, name, 0));
-    p = stpcpy(p, tmp);
-    sprintf(tmp, "An account has been created for you at %s.\n\n", conn[ci].website);
-    p = stpcpy(p, tmp);
+    OUTP_BEGIN(message);
 
-    p = stpcpy(p, "Please visit this address to log in:\n\n");
-
+    OUTP("Dear %s,\n\n", silgy_usr_name(login, email, name, 0));
+    OUTP("An account has been created for you at %s.\n\n", conn[ci].website);
+    OUTP("Please visit this address to log in:\n\n");
 #ifdef HTTPS
-    sprintf(tmp, "https://%s/%s\n\n", conn[ci].host, APP_LOGIN_URI);
+    if ( G_test )
+        OUTP("http://%s/%s\n\n", conn[ci].host, APP_LOGIN_URI);
+    else
+        OUTP("https://%s/%s\n\n", conn[ci].host, APP_LOGIN_URI);
 #else
-    sprintf(tmp, "http://%s/%s\n\n", conn[ci].host, APP_LOGIN_URI);
+    OUTP("http://%s/%s\n\n", conn[ci].host, APP_LOGIN_URI);
 #endif
-    p = stpcpy(p, tmp);
-
-    sprintf(tmp, "Your password is %s and you will have to change it on your first login.\n\n", passwd[0]?passwd:"empty");
-    p = stpcpy(p, tmp);
-
+    if ( status == USER_STATUS_PASSWORD_CHANGE )
+        OUTP("Your password is %s and you will have to change it on your first login.\n\n", passwd[0]?passwd:"empty");
 #ifdef APP_CONTACT_EMAIL
-    sprintf(tmp, "In case you needed any help, please contact us at %s.\n\n", APP_CONTACT_EMAIL);
-    p = stpcpy(p, tmp);
+    OUTP("In case you needed any help, please contact us at %s.\n\n", APP_CONTACT_EMAIL);
 #endif
-    p = stpcpy(p, "Kind Regards\n");
+    OUTP("Kind Regards\n");
+    OUTP("%s\n", conn[ci].website);
 
-    sprintf(tmp, "%s\n", conn[ci].website);
-    p = stpcpy(p, tmp);
+    OUTP_END;
 
     sprintf(subject, "Welcome to %s", conn[ci].website);
 
@@ -1295,16 +1541,18 @@ static int new_account_notification(int ci, const char *login, const char *email
 /* --------------------------------------------------------------------------
    Create user account
 -------------------------------------------------------------------------- */
-int silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email, const char *name, const char *passwd, const char *phone, const char *about, short auth_level)
+int silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email, const char *name, const char *passwd, const char *phone, const char *lang, const char *tz, const char *about, char group_id, char auth_level, char status)
 {
     int   ret=OK;
+    QSVAL dst_login;
     QSVAL password;
 
     DBG("silgy_usr_add_user");
 
     if ( use_qs )   /* use query string / POST payload */
     {
-        if ( (ret=create_account(ci, auth_level, USER_STATUS_PASSWORD_CHANGE, FALSE)) != OK )
+//        if ( (ret=create_account(ci, auth_level, USER_STATUS_PASSWORD_CHANGE, FALSE)) != OK )
+        if ( (ret=create_account(ci, auth_level, status, FALSE)) != OK )
         {
             ERR("create_account failed");
             return ret;
@@ -1314,10 +1562,32 @@ int silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email
     }
     else    /* use function arguments */
     {
-        QSVAL login_u;
-        QSVAL email_u;
-        char sql[SQLBUF];
-        char str1[32], str2[32];
+#ifdef USERSBYEMAIL
+        if ( !email || !email[0] )    /* email empty */
+        {
+            ERR("Invalid request (email missing)");
+            return ERR_EMAIL_EMPTY;
+        }
+#endif  /* USERSBYEMAIL */
+
+        if ( !login || !login[0] )    /* login empty */
+        {
+#ifdef USERSBYEMAIL
+            COPY(dst_login, email, LOGIN_LEN);
+#else   /* USERSBYLOGIN */
+            if ( email[0] )
+                COPY(dst_login, email, LOGIN_LEN);
+            else
+            {
+                ERR("Either login or email is required");
+                return ERR_INVALID_REQUEST;
+            }
+#endif
+        }
+        else    /* login supplied */
+        {
+            COPY(dst_login, login, LOGIN_LEN);
+        }
 
         /* --------------------------------------------------------------- */
 
@@ -1333,31 +1603,40 @@ int silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email
             return ERR_EMAIL_EMPTY;
         else if ( !valid_email(email) )                 /* invalid email format */
             return ERR_EMAIL_FORMAT;
-        else if ( OK != (ret=email_exists(email)) )     /* email not unique */
-            return ret;
-#else
-        if ( strlen(login) < MIN_USERNAME_LEN )         /* user name too short */
+#else   /* USERSBYLOGIN */
+        if ( strlen(dst_login) < MIN_USERNAME_LEN )     /* user name too short */
             return ERR_USERNAME_TOO_SHORT;
-        else if ( !valid_username(login) )              /* only certain chars are allowed in user name */
+        else if ( !valid_username(dst_login) )          /* only certain chars are allowed in user name */
             return ERR_USERNAME_CHARS;
-        else if ( OK != (ret=user_exists(login)) )      /* user name taken */
+        else if ( OK != (ret=user_exists(dst_login)) )  /* user name taken */
             return ret;
         else if ( email[0] && !valid_email(email) )     /* invalid email format */
             return ERR_EMAIL_FORMAT_OR_EMPTY;
 #endif  /* USERSBYEMAIL */
 
+        if ( email[0] && OK != (ret=email_exists(email)) )  /* email in use */
+            return ret;
+        else if ( (ret=silgy_usr_password_quality(password)) != OK )
+            return ret;
+
         /* --------------------------------------------------------------- */
 
-        get_hashes(str1, str2, login, email, password);
+        char str1[32], str2[32];
+
+        get_hashes(str1, str2, dst_login, email, password);
 
         /* --------------------------------------------------------------- */
 
-        strcpy(login_u, upper(login));
+        QSVAL login_u;
+        QSVAL email_u;
+        char sql[SQLBUF];
+
+        strcpy(login_u, upper(dst_login));
         strcpy(email_u, upper(email));
 
-        sprintf(sql, "INSERT INTO users (id,login,login_u,email,email_u,name,phone,passwd1,passwd2,about,auth_level,status,created,visits,ula_cnt) VALUES (0,'%s','%s','%s','%s','%s','%s','%s','%s','%s',%hd,%hd,'%s',0,0)", login, login_u, email, email_u, name?name:"", phone?phone:"", str1, str2, about?about:"", auth_level, USER_STATUS_PASSWORD_CHANGE, G_dt);
+        sprintf(sql, "INSERT INTO users (id,login,login_u,email,email_u,name,phone,passwd1,passwd2,lang,tz,about,group_id,auth_level,status,created,visits,ula_cnt) VALUES (0,'%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s',%d,%d,%d,'%s',0,0)", dst_login, login_u, email, email_u, name?name:"", phone?phone:"", str1, str2, lang?lang:"", tz?tz:"", about?about:"", group_id, auth_level, status, DT_NOW);
 
-        DBG("sql: INSERT INTO users (id,login,email,name,phone,...) VALUES (0,'%s','%s','%s','%s',...)", login, email, name?name:"", phone?phone:"");
+        DBG("sql: INSERT INTO users (id,login,email,name,phone,...) VALUES (0,'%s','%s','%s','%s',...)", dst_login, email, name?name:"", phone?phone:"");
 
         if ( mysql_query(G_dbconn, sql) )
         {
@@ -1372,7 +1651,7 @@ int silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email
 #ifdef USERSBYEMAIL
         INF("User [%s] created", email);
 #else
-        INF("User [%s] created", login);
+        INF("User [%s] created", dst_login);
 #endif
     }
 
@@ -1384,7 +1663,7 @@ int silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email
         strcpy(email_, email);
 
     if ( email_[0] )
-        new_account_notification(ci, login, email_, name, password);
+        new_account_notification(ci, dst_login, email_, name, password, status);
 #endif
 
     return ret;
@@ -1396,33 +1675,28 @@ int silgy_usr_add_user(int ci, bool use_qs, const char *login, const char *email
 -------------------------------------------------------------------------- */
 int silgy_usr_send_message(int ci)
 {
-    char message[MAX_LONG_URI_VAL_LEN+1];
+    QSVAL_TEXT message;
 
     DBG("silgy_usr_send_message");
 
-    if ( !get_qs_param_long(ci, "msg_box", message) )
+    if ( !QS_TEXT_DONT_ESCAPE("msg_box", message) )
     {
         WAR("Invalid request (URI val missing?)");
         return ERR_INVALID_REQUEST;
     }
 
     QSVAL   email;
-static char sanmessage[MAX_LONG_URI_VAL_LEN*2];
+static char sanmessage[MAX_LONG_URI_VAL_LEN+1];
 static char sql[MAX_LONG_URI_VAL_LEN*2];
 
     if ( QS_HTML_ESCAPE("email", email) )
         stp_right(email);
 
     sprintf(sanmessage, "From %s\n\n", conn[ci].ip);
-    strcpy(sanmessage+strlen(sanmessage), silgy_html_esc(message));
+    COPY(sanmessage+strlen(sanmessage), silgy_sql_esc(message), MAX_LONG_URI_VAL_LEN);
 
-    /* remember user details in case of error or warning to correct */
-
-    if ( conn[ci].usi )
-        strcpy(US.email_tmp, email);
-
-    sprintf(sql, "INSERT INTO users_messages (user_id,msg_id,email,message,created) VALUES (%ld,%ld,'%s','%s','%s')", US.uid, get_max(ci, "messages")+1, email, sanmessage, G_dt);
-    DBG("sql: INSERT INTO users_messages (user_id,msg_id,email,...) VALUES (%ld,get_max(),'%s',...)", US.uid, email);
+    sprintf(sql, "INSERT INTO users_messages (user_id,msg_id,email,message,created) VALUES (%d,%d,'%s','%s','%s')", UID, get_max(ci, "messages")+1, email, sanmessage, DT_NOW);
+    DBG("sql: INSERT INTO users_messages (user_id,msg_id,email,...) VALUES (%d,get_max(),'%s',...)", UID, email);
 
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -1430,7 +1704,7 @@ static char sql[MAX_LONG_URI_VAL_LEN*2];
         return ERR_INT_SERVER_ERROR;
     }
 
-    /* send an email to admin */
+    /* email admin */
 
 #ifdef APP_CONTACT_EMAIL
     silgy_email(APP_CONTACT_EMAIL, "New message!", sanmessage);
@@ -1446,11 +1720,14 @@ static char sql[MAX_LONG_URI_VAL_LEN*2];
 int silgy_usr_save_account(int ci)
 {
     int         ret=OK;
-    QSVAL       login;
-    QSVAL       email;
-    QSVAL       name;
-    QSVAL       phone;
-    QSVAL       about;
+    QSVAL       tmp;
+    char        login[LOGIN_LEN+1];
+    char        email[EMAIL_LEN+1];
+    char        name[UNAME_LEN+1];
+    char        phone[PHONE_LEN+1];
+    QSVAL       lang;
+    QSVAL       tz;
+    char        about[ABOUT_LEN+1];
     QSVAL       passwd;
     QSVAL       rpasswd;
     QSVAL       opasswd;
@@ -1463,58 +1740,105 @@ int silgy_usr_save_account(int ci)
     char        sql[SQLBUF];
     char        str1[32], str2[32];
     MYSQL_RES   *result;
-    unsigned    records;
     MYSQL_ROW   row;
 
     DBG("silgy_usr_save_account");
 
-    if ( !QS_HTML_ESCAPE("opasswd", opasswd)
-#ifndef USERSBYEMAIL
-            || !QS_HTML_ESCAPE("login", login)
-#endif
-            || !QS_HTML_ESCAPE("email", email)
-            || !QS_HTML_ESCAPE("passwd", passwd)
-            || !QS_HTML_ESCAPE("rpasswd", rpasswd) )
+    if ( !QS_HTML_ESCAPE("opasswd", opasswd) )
     {
-        WAR("Invalid request (URI val missing?)");
+        WAR("Invalid request (opasswd missing)");
         return ERR_INVALID_REQUEST;
     }
 
-#ifdef USERSBYEMAIL
-    if ( QS_HTML_ESCAPE("login", login) )     /* try to get login anyway */
+    if ( QS_HTML_ESCAPE("login", tmp) )
+    {
+        COPY(login, tmp, LOGIN_LEN);
         stp_right(login);
-#endif
+    }
+    else
+        login[0] = EOS;
 
-    stp_right(email);   /* always present but can be empty */
+    if ( QS_HTML_ESCAPE("email", tmp) )
+    {
+        COPY(email, tmp, EMAIL_LEN);
+        stp_right(email);
+    }
+    else
+        email[0] = EOS;
 
-    if ( QS_HTML_ESCAPE("name", name) ) /* optional */
+#ifdef USERSBYEMAIL
+    if ( !email[0] )    /* email empty */
+    {
+        ERR("Invalid request (email missing)");
+        return ERR_EMAIL_EMPTY;
+    }
+#else
+    if ( !login[0] )    /* login empty */
+    {
+        ERR("Invalid request (login missing)");
+        return ERR_INVALID_REQUEST;
+    }
+#endif  /* USERSBYEMAIL */
+
+    /* optional */
+
+    if ( !QS_HTML_ESCAPE("passwd", passwd) )
+        passwd[0] = EOS;
+
+    if ( !QS_HTML_ESCAPE("rpasswd", rpasswd) )
+        rpasswd[0] = EOS;
+
+    if ( QS_HTML_ESCAPE("name", tmp) )
+    {
+        COPY(name, tmp, UNAME_LEN);
         stp_right(name);
+    }
+    else
+        name[0] = EOS;
 
-    if ( QS_HTML_ESCAPE("phone", phone) ) /* optional */
+    if ( QS_HTML_ESCAPE("phone", tmp) )
+    {
+        COPY(phone, tmp, PHONE_LEN);
         stp_right(phone);
+    }
+    else
+        phone[0] = EOS;
 
-    if ( QS_HTML_ESCAPE("about", about) ) /* optional */
+    if ( QS_HTML_ESCAPE("lang", lang) )
+        stp_right(lang);
+    else
+        lang[0] = EOS;
+
+    if ( QS_HTML_ESCAPE("tz", tz) )
+        stp_right(tz);
+    else
+        tz[0] = EOS;
+
+    if ( QS_HTML_ESCAPE("about", tmp) )
+    {
+        COPY(about, tmp, ABOUT_LEN);
         stp_right(about);
+    }
+    else
+        about[0] = EOS;
 
     /* remember form fields */
     /* US.email contains old email */
 
-    strncpy(US.login_tmp, login, LOGIN_LEN);
-    US.login_tmp[LOGIN_LEN] = EOS;
-    strncpy(US.email_tmp, email, EMAIL_LEN);
-    US.email_tmp[EMAIL_LEN] = EOS;
-    strncpy(US.name_tmp, name, UNAME_LEN);
-    US.name_tmp[UNAME_LEN] = EOS;
-    strncpy(US.phone_tmp, phone, PHONE_LEN);
-    US.phone_tmp[PHONE_LEN] = EOS;
-    strncpy(US.about_tmp, about, ABOUT_LEN);
-    US.about_tmp[ABOUT_LEN] = EOS;
+    usession_t us_new;
 
-    DBG("login_tmp: [%s]", US.login_tmp);
-    DBG("email_tmp: [%s]", US.email_tmp);
-    DBG(" name_tmp: [%s]", US.name_tmp);
-    DBG("phone_tmp: [%s]", US.phone_tmp);
-    DBG("about_tmp: [%s]", US.about_tmp);
+    strcpy(us_new.login, login);
+    strcpy(us_new.email, email);
+    strcpy(us_new.name, name);
+    strcpy(us_new.phone, phone);
+
+    strncpy(us_new.lang, lang, LANG_LEN);
+    us_new.lang[LANG_LEN] = EOS;
+
+    strncpy(us_new.tz, tz, 5);
+    us_new.tz[5] = EOS;
+
+    strcpy(us_new.about, about);
 
     /* basic validation */
 
@@ -1529,8 +1853,8 @@ int silgy_usr_save_account(int ci)
     if ( email[0] && !valid_email(email) )
         return ERR_EMAIL_FORMAT_OR_EMPTY;
 #endif  /* USERSBYEMAIL */
-    else if ( plen && plen < MIN_PASSWORD_LEN )
-        return ERR_PASSWORD_TOO_SHORT;
+    else if ( plen && (ret=silgy_usr_password_quality(passwd)) != OK )
+        return ret;
     else if ( plen && 0 != strcmp(passwd, rpasswd) )
         return ERR_PASSWORD_DIFFERENT;
 
@@ -1563,16 +1887,14 @@ int silgy_usr_save_account(int ci)
         return ERR_INT_SERVER_ERROR;
     }
 
-    records = mysql_num_rows(result);
+    row = mysql_fetch_row(result);
 
-    if ( 0 == records )
+    if ( !row )
     {
         ERR("Weird: no such user");
         mysql_free_result(result);
         return ERR_INT_SERVER_ERROR;
     }
-
-    row = mysql_fetch_row(result);
 
     if ( 0 != strcmp(str1, row[0]) )
     {
@@ -1593,7 +1915,7 @@ int silgy_usr_save_account(int ci)
             return WAR_BEFORE_DELETE;
         else
         {
-            sprintf(sql, "UPDATE users SET status=%d WHERE id=%ld", USER_STATUS_DELETED, US.uid);
+            sprintf(sql, "UPDATE users SET status=%d WHERE id=%d", USER_STATUS_DELETED, UID);
             DBG("sql: %s", sql);
             if ( mysql_query(G_dbconn, sql) )
             {
@@ -1611,8 +1933,8 @@ int silgy_usr_save_account(int ci)
 
     get_hashes(str1, str2, login, email, plen?passwd:opasswd);
 
-    sprintf(sql, "UPDATE users SET login='%s', email='%s', name='%s', phone='%s', passwd1='%s', passwd2='%s', about='%s' WHERE id=%ld", login, email, name, phone, str1, str2, about, US.uid);
-    DBG("sql: UPDATE users SET login='%s', email='%s', name='%s', phone='%s',... WHERE id=%ld", login, email, name, phone, US.uid);
+    sprintf(sql, "UPDATE users SET login='%s', email='%s', email_u='%s', name='%s', phone='%s', passwd1='%s', passwd2='%s', lang='%s', tz='%s', about='%s' WHERE id=%d", login, email, upper(email), name, phone, str1, str2, lang, tz, about, UID);
+    DBG("sql: UPDATE users SET login='%s', email='%s', name='%s', phone='%s',... WHERE id=%d", login, email, name, phone, UID);
 
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -1622,11 +1944,13 @@ int silgy_usr_save_account(int ci)
 
     DBG("Updating login, email, name, phone & about in user session");
 
-    strcpy(US.login, US.login_tmp);
-    strcpy(US.email, US.email_tmp);
-    strcpy(US.name, US.name_tmp);
-    strcpy(US.phone, US.phone_tmp);
-    strcpy(US.about, US.about_tmp);
+    strcpy(US.login, us_new.login);
+    strcpy(US.email, us_new.email);
+    strcpy(US.name, us_new.name);
+    strcpy(US.phone, us_new.phone);
+    strcpy(US.lang, us_new.lang);
+    strcpy(US.tz, us_new.tz);
+    strcpy(US.about, us_new.about);
 
     /* On password change invalidate all existing sessions except of the current one */
 
@@ -1634,7 +1958,7 @@ int silgy_usr_save_account(int ci)
     {
         DBG("Password change => invalidating all other session tokens");
 
-        sprintf(sql, "DELETE FROM users_logins WHERE user_id = %ld AND sesid != BINARY '%s'", UID, US.sesid);
+        sprintf(sql, "DELETE FROM users_logins WHERE user_id = %d AND sesid != BINARY '%s'", UID, US.sesid);
         DBG("sql: %s", sql);
         if ( mysql_query(G_dbconn, sql) )
         {
@@ -1657,7 +1981,7 @@ int silgy_usr_save_account(int ci)
 -------------------------------------------------------------------------- */
 int silgy_usr_email_registered(int ci)
 {
-    QSVAL   email;
+    QSVAL email;
 
     DBG("silgy_usr_email_registered");
 
@@ -1676,7 +2000,7 @@ int silgy_usr_email_registered(int ci)
 /* --------------------------------------------------------------------------
    Return the best version of the user name for "Dear ..."
 -------------------------------------------------------------------------- */
-char *silgy_usr_name(const char *login, const char *email, const char *name, long uid)
+char *silgy_usr_name(const char *login, const char *email, const char *name, int uid)
 {
 static char dest[128];
 
@@ -1700,10 +2024,9 @@ static char dest[128];
     {
         char            sql[SQLBUF];
         MYSQL_RES       *result;
-        unsigned        records;
         MYSQL_ROW       row;
 
-        sprintf(sql, "SELECT login, email, name FROM users WHERE id=%ld", uid);
+        sprintf(sql, "SELECT login, email, name FROM users WHERE id=%d", uid);
         DBG("sql: %s", sql);
         mysql_query(G_dbconn, sql);
         result = mysql_store_result(G_dbconn);
@@ -1714,9 +2037,9 @@ static char dest[128];
         }
         else    /* OK */
         {
-            records = mysql_num_rows(result);
+            row = mysql_fetch_row(result);
 
-            if ( 0 == records )
+            if ( !row )
             {
                 mysql_free_result(result);
                 strcpy(dest, "User");
@@ -1726,8 +2049,6 @@ static char dest[128];
                 char db_login[128];
                 char db_email[128];
                 char db_name[128];
-
-                row = mysql_fetch_row(result);
 
                 strcpy(db_login, row[0]?row[0]:"");
                 strcpy(db_email, row[1]?row[1]:"");
@@ -1769,7 +2090,6 @@ int silgy_usr_send_passwd_reset_email(int ci)
     QSVAL       submit;
     char        sql[SQLBUF];
     MYSQL_RES   *result;
-    unsigned    records;
     MYSQL_ROW   row;
 
     DBG("silgy_usr_send_passwd_reset_email");
@@ -1795,11 +2115,9 @@ int silgy_usr_send_passwd_reset_email(int ci)
         return ERR_INT_SERVER_ERROR;
     }
 
-    records = mysql_num_rows(result);
+    row = mysql_fetch_row(result);
 
-    DBG("users: %u record(s) found", records);
-
-    if ( 0 == records )
+    if ( !row )
     {
         mysql_free_result(result);
         WAR("Password reset link requested for non-existent [%s]", email);
@@ -1807,8 +2125,6 @@ int silgy_usr_send_passwd_reset_email(int ci)
     }
 
     /* -------------------------------------------------------------------------- */
-
-    row = mysql_fetch_row(result);
 
     if ( atoi(row[3]) == USER_STATUS_DELETED )
     {
@@ -1819,11 +2135,11 @@ int silgy_usr_send_passwd_reset_email(int ci)
 
     /* -------------------------------------------------------------------------- */
 
-    long uid;
+    int uid;
     char login[128];
     char name[128];
 
-    uid = atol(row[0]);
+    uid = atoi(row[0]);
     strcpy(login, row[1]?row[1]:"");
     strcpy(name, row[2]?row[2]:"");
 
@@ -1836,7 +2152,7 @@ int silgy_usr_send_passwd_reset_email(int ci)
 
     silgy_random(linkkey, PASSWD_RESET_KEY_LEN);
 
-    sprintf(sql, "INSERT INTO users_p_resets (linkkey,user_id,created,tries) VALUES ('%s',%ld,'%s',0)", linkkey, uid, G_dt);
+    sprintf(sql, "INSERT INTO users_p_resets (linkkey,user_id,created,tries) VALUES ('%s',%d,'%s',0)", linkkey, uid, DT_NOW);
     DBG("sql: %s", sql);
 
     if ( mysql_query(G_dbconn, sql) )
@@ -1850,35 +2166,28 @@ int silgy_usr_send_passwd_reset_email(int ci)
 
     char subject[256];
     char message[4096];
-    char tmp[1024];
-    char *p=message;
 
-    sprintf(tmp, "Dear %s,\n\n", silgy_usr_name(login, email, name, 0));
-    p = stpcpy(p, tmp);
-    sprintf(tmp, "You have requested to have your password reset for your account at %s. Please visit this URL to reset your password:\n\n", conn[ci].website);
-    p = stpcpy(p, tmp);
+    OUTP_BEGIN(message);
 
+    OUTP("Dear %s,\n\n", silgy_usr_name(login, email, name, 0));
+    OUTP("You have requested to have your password reset for your account at %s. Please visit this URL to reset your password:\n\n", conn[ci].website);
 #ifdef HTTPS
     if ( G_test )
-        sprintf(tmp, "http://%s/preset?k=%s\n\n", conn[ci].host, linkkey);
+        OUTP("http://%s/preset?k=%s\n\n", conn[ci].host, linkkey);
     else
-        sprintf(tmp, "https://%s/preset?k=%s\n\n", conn[ci].host, linkkey);
+        OUTP("https://%s/preset?k=%s\n\n", conn[ci].host, linkkey);
 #else
-    sprintf(tmp, "http://%s/preset?k=%s\n\n", conn[ci].host, linkkey);
+    OUTP("http://%s/preset?k=%s\n\n", conn[ci].host, linkkey);
 #endif  /* HTTPS */
-
-    p = stpcpy(p, tmp);
-
-    p = stpcpy(p, "Please keep in mind that this link will only be valid for the next 24 hours.\n\n");
-    p = stpcpy(p, "If you did this by mistake or it wasn't you, you can safely ignore this email.\n\n");
+    OUTP("Please keep in mind that this link will only be valid for the next 24 hours.\n\n");
+    OUTP("If you did this by mistake or it wasn't you, you can safely ignore this email.\n\n");
 #ifdef APP_CONTACT_EMAIL
-    sprintf(tmp, "In case you needed any help, please contact us at %s.\n\n", APP_CONTACT_EMAIL);
-    p = stpcpy(p, tmp);
+    OUTP("In case you needed any help, please contact us at %s.\n\n", APP_CONTACT_EMAIL);
 #endif
-    p = stpcpy(p, "Kind Regards\n");
+    OUTP("Kind Regards\n");
+    OUTP("%s\n", conn[ci].website);
 
-    sprintf(tmp, "%s\n", conn[ci].website);
-    p = stpcpy(p, tmp);
+    OUTP_END;
 
     sprintf(subject, "%s Password Reset", conn[ci].website);
 
@@ -1896,12 +2205,11 @@ int silgy_usr_send_passwd_reset_email(int ci)
 /* --------------------------------------------------------------------------
    Verify the link key for password reset
 -------------------------------------------------------------------------- */
-int silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid)
+int silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, int *uid)
 {
     char        sql[SQLBUF];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    unsigned    records;
     char        esc_linkkey[256];
     int         tries;
 
@@ -1925,17 +2233,13 @@ int silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid)
         return ERR_INT_SERVER_ERROR;
     }
 
-    records = mysql_num_rows(result);
+    row = mysql_fetch_row(result);
 
-    DBG("users_p_resets: %u row(s) found", records);
-
-    if ( !records )     /* no records with this key in users_p_resets -- link broken? */
+    if ( !row )     /* no records with this key in users_p_resets -- link broken? */
     {
         mysql_free_result(result);
         return ERR_LINK_MAY_BE_EXPIRED;
     }
-
-    row = mysql_fetch_row(result);
 
     /* validate expiry time */
 
@@ -1961,11 +2265,11 @@ int silgy_usr_verify_passwd_reset_key(int ci, char *linkkey, long *uid)
 
     /* get the user id */
 
-    *uid = atol(row[0]);
+    *uid = atoi(row[0]);
 
     mysql_free_result(result);
 
-    DBG("Key ok, uid = %ld", *uid);
+    DBG("Key ok, uid = %d", *uid);
 
     /* update tries counter */
 
@@ -1988,7 +2292,7 @@ int silgy_usr_activate(int ci)
 {
     int         ret;
     QSVAL       linkkey;
-    long        uid;
+    int         uid;
     char        sql[SQLBUF];
 
     DBG("silgy_usr_activate");
@@ -2006,7 +2310,7 @@ int silgy_usr_activate(int ci)
 
     /* everything's OK -- activate user -------------------- */
 
-    sprintf(sql, "UPDATE users SET status=%d WHERE id=%ld", USER_STATUS_ACTIVE, uid);
+    sprintf(sql, "UPDATE users SET status=%d WHERE id=%d", USER_STATUS_ACTIVE, uid);
     DBG("sql: %s", sql);
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -2016,13 +2320,108 @@ int silgy_usr_activate(int ci)
 
     /* remove activation link */
 
-    sprintf(sql, "UPDATE users_activations SET activated='Y' WHERE linkkey = BINARY '%s'", linkkey);
+    sprintf(sql, "UPDATE users_activations SET activated='%s' WHERE linkkey = BINARY '%s'", DT_NOW, linkkey);
     DBG("sql: %s", sql);
     if ( mysql_query(G_dbconn, sql) )
     {
         ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
 //        return ERR_INT_SERVER_ERROR;  ignore it
     }
+
+    return OK;
+}
+
+
+/* --------------------------------------------------------------------------
+   Save user's avatar
+-------------------------------------------------------------------------- */
+int silgy_usr_save_avatar(int ci, int uid)
+{
+    QSVAL   name;
+    QSVAL   name_filtered;
+    char    *img_raw;                       /* raw image data */
+static char img_esc[MAX_AVATAR_SIZE*2];     /* image data escaped */
+static char sql[MAX_AVATAR_SIZE*2+1024];
+    unsigned len;
+
+    DBG("silgy_usr_save_avatar");
+
+    img_raw = get_qs_param_multipart(ci, "data", &len, name);
+
+    if ( !img_raw || len < 1 )
+    {
+        WAR("data is required");
+        return ERR_INVALID_REQUEST;
+    }
+
+    strcpy(name_filtered, silgy_filter_strict(name));
+
+    DBG("Image file name [%s], size = %d", name_filtered, len);
+
+    if ( len > MAX_AVATAR_SIZE )
+    {
+        WAR("This file is too big");
+        return ERR_FILE_TOO_BIG;
+    }
+    else
+    {
+        mysql_real_escape_string(G_dbconn, img_esc, img_raw, len);
+
+        sprintf(sql, "UPDATE users SET avatar_name='%s', avatar_data='%s' WHERE id=%d", name_filtered, img_esc, uid);
+
+        DBG("UPDATE users SET avatar_name='%s', avatar_data=<binary> WHERE id=%d", name_filtered, uid);
+
+        if ( mysql_query(G_dbconn, sql) )
+        {
+            ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+            return ERR_INT_SERVER_ERROR;
+        }
+    }
+
+    return OK;
+}
+
+
+/* --------------------------------------------------------------------------
+   Get user's avatar
+-------------------------------------------------------------------------- */
+int silgy_usr_get_avatar(int ci, int uid)
+{
+    char        sql[SQLBUF];
+    MYSQL_RES   *result;
+    MYSQL_ROW   row;
+    unsigned long *lengths;
+
+    DBG("silgy_usr_get_avatar");
+
+    sprintf(sql, "SELECT avatar_name, avatar_data FROM users WHERE id=%d", uid);
+    DBG("sql: %s", sql);
+    mysql_query(G_dbconn, sql);
+    result = mysql_store_result(G_dbconn);
+    if ( !result )
+    {
+        ERR("%u: %s", mysql_errno(G_dbconn), mysql_error(G_dbconn));
+        return ERR_INT_SERVER_ERROR;
+    }
+
+    row = mysql_fetch_row(result);
+
+    if ( !row )
+    {
+        mysql_free_result(result);
+        WAR("User not found");
+        return ERR_NOT_FOUND;
+    }
+
+    lengths = mysql_fetch_lengths(result);
+
+    OUT_BIN(row[1], lengths[1]);
+
+    conn[ci].ctype = get_res_type(row[0]);
+
+    DBG("File: [%s], size = %ul", row[0], lengths[1]);
+
+    mysql_free_result(result);
 
     return OK;
 }
@@ -2040,12 +2439,11 @@ int silgy_usr_change_password(int ci)
     QSVAL       passwd;
     QSVAL       rpasswd;
     QSVAL       submit;
-    long        uid;
+    int         uid;
     char        sql[SQLBUF];
     char        str1[32], str2[32];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    unsigned    records;
 
     DBG("silgy_usr_change_password");
 
@@ -2078,16 +2476,14 @@ int silgy_usr_change_password(int ci)
         return ERR_INT_SERVER_ERROR;
     }
 
-    records = mysql_num_rows(result);
+    row = mysql_fetch_row(result);
 
-    if ( 0 == records )
+    if ( !row )
     {
         ERR("Weird: no such user");
         mysql_free_result(result);
         return ERR_INT_SERVER_ERROR;
     }
-
-    row = mysql_fetch_row(result);
 
     if ( 0 != strcmp(str1, row[0]) )
     {
@@ -2106,8 +2502,8 @@ int silgy_usr_change_password(int ci)
 
     int plen = strlen(passwd);
 
-    if ( plen < MIN_PASSWORD_LEN )       /* password too short */
-        return ERR_PASSWORD_TOO_SHORT;
+    if ( (ret=silgy_usr_password_quality(passwd)) != OK )
+        return ret;
     else if ( 0 != strcmp(passwd, rpasswd) )   /* passwords differ */
         return ERR_PASSWORD_DIFFERENT;
 
@@ -2117,11 +2513,9 @@ int silgy_usr_change_password(int ci)
 
     get_hashes(str1, str2, US.login, US.email, passwd);
 
-    mysql_free_result(result);
-
     DBG("Updating users...");
 
-    sprintf(sql, "UPDATE users SET passwd1='%s', passwd2='%s', status=%hd WHERE id=%ld", str1, str2, USER_STATUS_ACTIVE, UID);
+    sprintf(sql, "UPDATE users SET passwd1='%s', passwd2='%s', status=%d WHERE id=%d", str1, str2, USER_STATUS_ACTIVE, UID);
     DBG("sql: UPDATE users SET passwd1=...");
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -2144,12 +2538,11 @@ int silgy_usr_reset_password(int ci)
     QSVAL       passwd;
     QSVAL       rpasswd;
     QSVAL       submit;
-    long        uid;
+    int         uid;
     char        sql[SQLBUF];
     char        str1[32], str2[32];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    unsigned    records;
 
     DBG("silgy_usr_reset_password");
 
@@ -2164,19 +2557,14 @@ int silgy_usr_reset_password(int ci)
 
     stp_right(email);
 
-    /* remember form fields */
-
-    if ( conn[ci].usi )
-        strcpy(US.email_tmp, email);
-
     /* general validation */
 
     int plen = strlen(passwd);
 
     if ( !valid_email(email) )
         return ERR_EMAIL_FORMAT;
-    else if ( plen < MIN_PASSWORD_LEN )       /* password too short */
-        return ERR_PASSWORD_TOO_SHORT;
+    else if ( (ret=silgy_usr_password_quality(passwd)) != OK )
+        return ret;
     else if ( 0 != strcmp(passwd, rpasswd) )    /* passwords differ */
         return ERR_PASSWORD_DIFFERENT;
 
@@ -2187,7 +2575,7 @@ int silgy_usr_reset_password(int ci)
 
     /* verify that emails match each other */
 
-    sprintf(sql, "SELECT login, email FROM users WHERE id=%ld", uid);
+    sprintf(sql, "SELECT login, email FROM users WHERE id=%d", uid);
     DBG("sql: %s", sql);
     mysql_query(G_dbconn, sql);
     result = mysql_store_result(G_dbconn);
@@ -2197,17 +2585,13 @@ int silgy_usr_reset_password(int ci)
         return ERR_INT_SERVER_ERROR;
     }
 
-    records = mysql_num_rows(result);
+    row = mysql_fetch_row(result);
 
-    DBG("users: %u record(s) found", records);
-
-    if ( 0 == records )     /* password reset link expired or invalid email */
+    if ( !row )     /* password reset link expired or invalid email */
     {
         mysql_free_result(result);
         return ERR_LINK_EXPIRED;
     }
-
-    row = mysql_fetch_row(result);
 
     if ( 0 != strcmp(row[1], email) )   /* emails different */
     {
@@ -2224,7 +2608,7 @@ int silgy_usr_reset_password(int ci)
 
     DBG("Updating users...");
 
-    sprintf(sql, "UPDATE users SET passwd1='%s', passwd2='%s' WHERE id=%ld", str1, str2, uid);
+    sprintf(sql, "UPDATE users SET passwd1='%s', passwd2='%s' WHERE id=%d", str1, str2, uid);
     DBG("sql: UPDATE users SET passwd1=...");
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -2236,7 +2620,7 @@ int silgy_usr_reset_password(int ci)
 
     DBG("Invalidating all session tokens...");
 
-    sprintf(sql, "DELETE FROM users_logins WHERE user_id = %ld", uid);
+    sprintf(sql, "DELETE FROM users_logins WHERE user_id = %d", uid);
     DBG("sql: %s", sql);
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -2252,7 +2636,7 @@ int silgy_usr_reset_password(int ci)
 
     DBG("Deleting from users_p_resets...");
 
-    sprintf(sql, "DELETE FROM users_p_resets WHERE user_id=%ld", uid);
+    sprintf(sql, "DELETE FROM users_p_resets WHERE user_id=%d", uid);
     DBG("sql: %s", sql);
     if ( mysql_query(G_dbconn, sql) )
     {
@@ -2271,19 +2655,6 @@ void silgy_usr_logout(int ci)
 {
     DBG("silgy_usr_logout");
     libusr_luses_downgrade(conn[ci].usi, ci, TRUE);
-}
-
-
-/* --------------------------------------------------------------------------
-   doit wrapper
--------------------------------------------------------------------------- */
-static void get_hashes(char *result1, char *result2, const char *login, const char *email, const char *passwd)
-{
-#ifdef USERSBYLOGIN
-    doit(result1, result2, login, email[0]?email:STR_005, passwd);
-#else
-    doit(result1, result2, email, email, passwd);
-#endif
 }
 
 
@@ -2321,18 +2692,31 @@ static void doit(char *result1, char *result2, const char *login, const char *em
 
 
 /* --------------------------------------------------------------------------
+   doit wrapper
+-------------------------------------------------------------------------- */
+static void get_hashes(char *result1, char *result2, const char *login, const char *email, const char *passwd)
+{
+#ifdef USERSBYLOGIN
+    doit(result1, result2, login, email[0]?email:STR_005, passwd);
+#else
+    doit(result1, result2, email, email, passwd);
+#endif
+}
+
+
+/* --------------------------------------------------------------------------
    Save user string setting
 -------------------------------------------------------------------------- */
 int silgy_usr_set_str(int ci, const char *us_key, const char *us_val)
 {
-    int  ret=OK;
+    int  ret;
     char sql[SQLBUF];
 
     ret = silgy_usr_get_str(ci, us_key, NULL);
 
     if ( ret == ERR_NOT_FOUND )
     {
-        sprintf(sql, "INSERT INTO users_settings (user_id,us_key,us_val) VALUES (%ld,'%s','%s')", US.uid, us_key, us_val);
+        sprintf(sql, "INSERT INTO users_settings (user_id,us_key,us_val) VALUES (%d,'%s','%s')", UID, us_key, us_val);
 
         DBG("sql: %s", sql);
 
@@ -2349,7 +2733,7 @@ int silgy_usr_set_str(int ci, const char *us_key, const char *us_val)
     }
     else
     {
-        sprintf(sql, "UPDATE users_settings SET us_val='%s' WHERE user_id=%ld AND us_key='%s'", us_val, US.uid, us_key);
+        sprintf(sql, "UPDATE users_settings SET us_val='%s' WHERE user_id=%d AND us_key='%s'", us_val, UID, us_key);
 
         DBG("sql: %s", sql);
 
@@ -2372,9 +2756,8 @@ int silgy_usr_get_str(int ci, const char *us_key, char *us_val)
     char        sql[SQLBUF];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    unsigned    records;
 
-    sprintf(sql, "SELECT us_val FROM users_settings WHERE user_id=%ld AND us_key='%s'", US.uid, us_key);
+    sprintf(sql, "SELECT us_val FROM users_settings WHERE user_id=%d AND us_key='%s'", UID, us_key);
 
     DBG("sql: %s", sql);
 
@@ -2388,17 +2771,13 @@ int silgy_usr_get_str(int ci, const char *us_key, char *us_val)
         return ERR_INT_SERVER_ERROR;
     }
 
-    records = mysql_num_rows(result);
+    row = mysql_fetch_row(result);
 
-    DBG("users_settings: %u record(s) found", records);
-
-    if ( 0 == records )
+    if ( !row )
     {
         mysql_free_result(result);
         return ERR_NOT_FOUND;
     }
-
-    row = mysql_fetch_row(result);
 
     if ( us_val )
         strcpy(us_val, row[0]);
@@ -2412,11 +2791,11 @@ int silgy_usr_get_str(int ci, const char *us_key, char *us_val)
 /* --------------------------------------------------------------------------
    Save user number setting
 -------------------------------------------------------------------------- */
-int silgy_usr_set_int(int ci, const char *us_key, long us_val)
+int silgy_usr_set_int(int ci, const char *us_key, int us_val)
 {
     char val[64];
 
-    sprintf(val, "%ld", us_val);
+    sprintf(val, "%d", us_val);
     return silgy_usr_set_str(ci, us_key, val);
 }
 
@@ -2424,13 +2803,13 @@ int silgy_usr_set_int(int ci, const char *us_key, long us_val)
 /* --------------------------------------------------------------------------
    Read user number setting
 -------------------------------------------------------------------------- */
-int silgy_usr_get_int(int ci, const char *us_key, long *us_val)
+int silgy_usr_get_int(int ci, const char *us_key, int *us_val)
 {
     int  ret;
     char val[64];
 
     if ( (ret=silgy_usr_get_str(ci, us_key, val)) == OK )
-        *us_val = atol(val);
+        *us_val = atoi(val);
 
     return ret;
 }
@@ -2439,17 +2818,17 @@ int silgy_usr_get_int(int ci, const char *us_key, long *us_val)
 /* --------------------------------------------------------------------------
    Get MAX(msg_id) from users_messages for current user
 -------------------------------------------------------------------------- */
-static long get_max(int ci, const char *table)
+static int get_max(int ci, const char *table)
 {
     char        sql[SQLBUF];
     MYSQL_RES   *result;
     MYSQL_ROW   row;
-    long        max=0;
+    int         max=0;
 
     /* US.uid = 0 for anonymous session */
 
     if ( 0==strcmp(table, "messages") )
-        sprintf(sql, "SELECT MAX(msg_id) FROM users_messages WHERE user_id=%ld", US.uid);
+        sprintf(sql, "SELECT MAX(msg_id) FROM users_messages WHERE user_id=%d", UID);
     else
         return 0;
 
@@ -2467,12 +2846,12 @@ static long get_max(int ci, const char *table)
 
     row = mysql_fetch_row(result);
 
-    if ( row[0] != NULL )
-        max = atol(row[0]);
+    if ( row[0] )
+        max = atoi(row[0]);
 
     mysql_free_result(result);
 
-    DBG("get_max for uid=%ld  max = %ld", US.uid, max);
+    DBG("get_max for uid=%d  max = %d", UID, max);
 
     return max;
 }
