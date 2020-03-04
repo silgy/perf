@@ -71,6 +71,7 @@ static char M_tsep=' ';                 /* thousand separator */
 static char M_dsep='.';                 /* decimal separator */
 
 static char *M_md_dest;
+static char M_md_list_type;
 
 #ifndef _WIN32
 static int  M_shmid[MAX_SHM_SEGMENTS]={0}; /* SHM id-s */
@@ -228,11 +229,23 @@ void silgy_safe_copy(char *dst, const char *src, size_t dst_len)
 /* --------------------------------------------------------- */
 /* MD parsing ---------------------------------------------- */
 
-#define MD_TAG_NONE '0'
-#define MD_TAG_P    'p'
-#define MD_TAG_H1   '1'
-#define MD_TAG_H2   '2'
-#define MD_TAG_H3   '3'
+#define MD_TAG_NONE         '0'
+#define MD_TAG_B            'b'
+#define MD_TAG_I            'i'
+#define MD_TAG_U            'u'
+#define MD_TAG_CODE         'c'
+#define MD_TAG_P            'p'
+#define MD_TAG_H1           '1'
+#define MD_TAG_H2           '2'
+#define MD_TAG_H3           '3'
+#define MD_TAG_H4           '4'
+#define MD_TAG_LI           'l'
+#define MD_TAG_EOD          '~'
+
+#define MD_LIST_ORDERED     'O'
+#define MD_LIST_UNORDERED   'U'
+
+#define IS_TAG_BLOCK        (tag==MD_TAG_P || tag==MD_TAG_H1 || tag==MD_TAG_H2 || tag==MD_TAG_H3 || tag==MD_TAG_H4 || tag==MD_TAG_LI)
 
 
 /* --------------------------------------------------------------------------
@@ -249,14 +262,57 @@ static int detect_tag(const char *src, char *tag)
         ++skip;
     }
 
-    if ( *src=='#' )
+    if ( *src=='*' )   /* bold, italic or list item */
+    {
+        if ( *(src+1)=='*' )
+        {
+            *tag = MD_TAG_B;
+            skip += 2;
+        }
+        else if ( *(src+1)==' ' )
+        {
+            *tag = MD_TAG_LI;
+            skip += 2;
+            M_md_list_type = MD_LIST_UNORDERED;
+        }
+        else    /* italic */
+        {
+            *tag = MD_TAG_I;
+            skip += 1;
+        }
+    }
+    else if ( *src=='_' )   /* underline */
+    {
+        *tag = MD_TAG_U;
+        skip += 1;
+    }
+    else if ( *src=='`' )   /* monospace */
+    {
+        *tag = MD_TAG_CODE;
+        skip += 1;
+    }
+    else if ( *src=='1' && *(src+1)=='.' && *(src+2)==' ' )   /* ordered list */
+    {
+        *tag = MD_TAG_LI;
+        skip += 3;
+        M_md_list_type = MD_LIST_ORDERED;
+    }
+    else if ( *src=='#' )    /* headers */
     {
         if ( *(src+1)=='#' )
         {
             if ( *(src+2)=='#' )
             {
-                *tag = MD_TAG_H3;
-                skip += 4;
+                if ( *(src+3)=='#' )
+                {
+                    *tag = MD_TAG_H4;
+                    skip += 5;
+                }
+                else
+                {
+                    *tag = MD_TAG_H3;
+                    skip += 4;
+                }
             }
             else
             {
@@ -270,13 +326,13 @@ static int detect_tag(const char *src, char *tag)
             skip += 2;
         }
     }
-    else if ( *src )
+    else if ( *src )    /* paragraph as default */
     {
         *tag = MD_TAG_P;
     }
     else    /* end of document */
     {
-        *tag = MD_TAG_NONE;
+        *tag = MD_TAG_EOD;
     }
 
     return skip;
@@ -286,48 +342,158 @@ static int detect_tag(const char *src, char *tag)
 /* --------------------------------------------------------------------------
    Open HTML tag
 -------------------------------------------------------------------------- */
-static void open_tag(char tag)
+static int open_tag(char tag)
 {
-    if ( tag == MD_TAG_P )
+    int written=0;
+
+    if ( tag == MD_TAG_B )
+    {
+        M_md_dest = stpcpy(M_md_dest, "<b>");
+        written = 3;
+    }
+    else if ( tag == MD_TAG_I )
+    {
+        M_md_dest = stpcpy(M_md_dest, "<i>");
+        written = 3;
+    }
+    else if ( tag == MD_TAG_U )
+    {
+        M_md_dest = stpcpy(M_md_dest, "<u>");
+        written = 3;
+    }
+    else if ( tag == MD_TAG_CODE )
+    {
+        M_md_dest = stpcpy(M_md_dest, "<code>");
+        written = 6;
+    }
+    else if ( tag == MD_TAG_P )
+    {
         M_md_dest = stpcpy(M_md_dest, "<p>");
+        written = 3;
+    }
     else if ( tag == MD_TAG_H1 )
+    {
         M_md_dest = stpcpy(M_md_dest, "<h1>");
+        written = 4;
+    }
     else if ( tag == MD_TAG_H2 )
+    {
         M_md_dest = stpcpy(M_md_dest, "<h2>");
+        written = 4;
+    }
     else if ( tag == MD_TAG_H3 )
+    {
         M_md_dest = stpcpy(M_md_dest, "<h3>");
+        written = 4;
+    }
+    else if ( tag == MD_TAG_H4 )
+    {
+        M_md_dest = stpcpy(M_md_dest, "<h4>");
+        written = 4;
+    }
+    else if ( tag == MD_TAG_LI )
+    {
+        M_md_dest = stpcpy(M_md_dest, "<li>");
+        written = 4;
+    }
+
+    return written;
 }
 
 
 /* --------------------------------------------------------------------------
    Close HTML tag
 -------------------------------------------------------------------------- */
-static void close_tag(const char *src, char tag)
+static int close_tag(const char *src, char tag)
 {
-    if ( tag == MD_TAG_P && (*src==EOS || *(src+1)==EOS || *(src+1)=='\n' || *(src+1)=='\r') )
+    int written=0;
+
+    if ( tag == MD_TAG_B )
+    {
+        M_md_dest = stpcpy(M_md_dest, "</b>");
+        written = 4;
+    }
+    else if ( tag == MD_TAG_I )
+    {
+        M_md_dest = stpcpy(M_md_dest, "</i>");
+        written = 4;
+    }
+    else if ( tag == MD_TAG_U )
+    {
+        M_md_dest = stpcpy(M_md_dest, "</u>");
+        written = 4;
+    }
+    else if ( tag == MD_TAG_CODE )
+    {
+        M_md_dest = stpcpy(M_md_dest, "</code>");
+        written = 7;
+    }
+//    if ( tag == MD_TAG_P && (*src==EOS || *(src+1)==EOS || *(src+1)=='\n' || *(src+1)=='\r') )
+    else if ( tag == MD_TAG_P )
+    {
         M_md_dest = stpcpy(M_md_dest, "</p>");
+        written = 4;
+    }
     else if ( tag == MD_TAG_H1 )
+    {
         M_md_dest = stpcpy(M_md_dest, "</h1>");
+        written = 5;
+    }
     else if ( tag == MD_TAG_H2 )
+    {
         M_md_dest = stpcpy(M_md_dest, "</h2>");
+        written = 5;
+    }
     else if ( tag == MD_TAG_H3 )
+    {
         M_md_dest = stpcpy(M_md_dest, "</h3>");
+        written = 5;
+    }
+    else if ( tag == MD_TAG_H4 )
+    {
+        M_md_dest = stpcpy(M_md_dest, "</h4>");
+        written = 5;
+    }
+    else if ( tag == MD_TAG_LI )
+    {
+        M_md_dest = stpcpy(M_md_dest, "</li>");
+        written = 5;
+    }
+
+    return written;
 }
 
 
 /* --------------------------------------------------------------------------
    Render simplified md to HTML
 -------------------------------------------------------------------------- */
-char *silgy_render_md(char *dest, const char *src)
+char *silgy_render_md(char *dest, const char *src, size_t len)
 {
-    int pos=0;    /* source position */
-    int skip;
+    int  pos=0;    /* source position */
+    char tag;
+    char tag_b=MD_TAG_NONE;   /* block */
+    char tag_i=MD_TAG_NONE;   /* inline */
+    int  skip;
+    int  written=0;
+    bool list=0;
 
     M_md_dest = dest;
 
-    char tag;
-
     skip = detect_tag(src, &tag);
+
+#ifdef DUMP
+    DBG("tag %c detected", tag);
+#endif
+
+    if ( tag == MD_TAG_LI )
+    {
+#ifdef DUMP
+        DBG("Starting unordered list");
+#endif
+        M_md_dest = stpcpy(M_md_dest, "<ul>");
+        written += 4;
+        list = 1;
+    }
 
     if ( skip )
     {
@@ -335,21 +501,98 @@ char *silgy_render_md(char *dest, const char *src)
         pos += skip;
     }
 
-    open_tag(tag);
+    if ( IS_TAG_BLOCK )
+    {
+        tag_b = tag;
+        written += open_tag(tag_b);
+    }
+    else    /* inline */
+    {
+        tag_i = tag;
+        written += open_tag(tag_i);
+    }
 
     const char *prev1, *prev2;
 
-    while ( *src )
+    while ( *src && written < len-18 )   /* worst case: </code></li></ul> */
     {
+#ifdef DUMP
+//        DBG("*src=%c", *src);
+#endif
         if ( pos > 0 )
             prev1 = src - 1;
 
         if ( pos > 1 )
             prev2 = src - 2;
 
-        if ( *src=='\n' )
+        if ( (*src=='*' || *src=='_' || *src=='`') && (!pos || *(src-1) != '\\') )   /* inline tags */
         {
-            close_tag(src, tag);
+            if ( tag_i==MD_TAG_B || tag_i==MD_TAG_I || tag_i==MD_TAG_U || tag_i==MD_TAG_CODE )
+            {
+#ifdef DUMP
+                DBG("Closing inline tag %c", tag_i);
+#endif
+                written += close_tag(src, tag_i);
+
+                if ( tag_i==MD_TAG_B )    /* double-char code */
+                {
+                    ++src;
+                    ++pos;
+                }
+
+                tag_i = MD_TAG_NONE;
+            }
+            else    /* opening tag */
+            {
+                skip = detect_tag(src, &tag);
+#ifdef DUMP
+                DBG("tag %c detected", tag);
+#endif
+                if ( skip )
+                {
+                    src += skip;
+                    pos += skip;
+                }
+
+                if ( IS_TAG_BLOCK )
+                {
+                    tag_b = tag;
+                    written += open_tag(tag_b);
+                }
+                else    /* inline */
+                {
+                    tag_i = tag;
+                    written += open_tag(tag_i);
+                }
+
+                if ( pos )
+                {
+                    src--;
+                    pos--;
+                }
+            }
+        }
+        else if ( pos && *src=='-' && *prev1=='-' )   /* convert -- to ndash */
+        {
+            M_md_dest = stpcpy(--M_md_dest, "–");
+            written += 3;
+        }
+        else if ( *src=='\n' && pos>1 && *prev1==' ' && *prev2==' ' )   /* convert    to <br> */
+        {
+            M_md_dest -= 2;
+            M_md_dest = stpcpy(M_md_dest, "<br>");
+            written += 2;
+        }
+        else if ( *src=='\n' )   /* block tags */
+        {
+            if ( tag_b != MD_TAG_NONE )
+            {
+#ifdef DUMP
+                DBG("Closing block tag %c", tag_b);
+#endif
+                written += close_tag(src, tag_b);
+                tag_b = MD_TAG_NONE;
+            }
 
             /* skip to the next line */
 
@@ -360,6 +603,41 @@ char *silgy_render_md(char *dest, const char *src)
             }
 
             skip = detect_tag(src, &tag);
+#ifdef DUMP
+            DBG("tag %c detected", tag);
+#endif
+            if ( tag == MD_TAG_LI )
+            {
+                if ( !list )    /* start a list */
+                {
+#ifdef DUMP
+                    DBG("Starting %sordered list", M_md_list_type==MD_LIST_ORDERED?"":"un");
+#endif
+                    if ( M_md_list_type == MD_LIST_ORDERED )
+                        M_md_dest = stpcpy(M_md_dest, "<ol>");
+                    else
+                        M_md_dest = stpcpy(M_md_dest, "<ul>");
+
+                    list = 1;
+                    written += 4;
+                }
+            }
+            else    /* tag != MD_TAG_LI */
+            {
+                if ( list )    /* close a list */
+                {
+#ifdef DUMP
+                    DBG("Closing %sordered list", M_md_list_type==MD_LIST_ORDERED?"":"un");
+#endif
+                    if ( M_md_list_type == MD_LIST_ORDERED )
+                        M_md_dest = stpcpy(M_md_dest, "</ol>");
+                    else
+                        M_md_dest = stpcpy(M_md_dest, "</ul>");
+
+                    list = 0;
+                    written += 5;
+                }
+            }
 
             if ( skip )
             {
@@ -367,7 +645,16 @@ char *silgy_render_md(char *dest, const char *src)
                 pos += skip;
             }
 
-            open_tag(tag);
+            if ( IS_TAG_BLOCK )
+            {
+                tag_b = tag;
+                written += open_tag(tag_b);
+            }
+            else    /* inline */
+            {
+                tag_i = tag;
+                written += open_tag(tag_i);
+            }
 
             if ( pos )
             {
@@ -375,22 +662,43 @@ char *silgy_render_md(char *dest, const char *src)
                 pos--;
             }
         }
-        else if ( pos > 0 && *src=='-' && *prev1=='-' )  /* convert -- to ndash */
-        {
-            M_md_dest = stpcpy(--M_md_dest, "–");
-        }
-        else if ( *src!='\r' && *src!='\n' && *src!='#' )
+//        else if ( *src!='\r' && *src!='\n' && *src!='#' )
+        else if ( *src!='\r' )
         {
             *M_md_dest++ = *src;
+            ++written;
         }
 
         ++src;
         ++pos;
     }
 
-    close_tag(src, tag);
+    if ( tag_b != MD_TAG_NONE )
+    {
+#ifdef DUMP
+        DBG("Closing block tag %c", tag_b);
+#endif
+        written += close_tag(src, tag_b);
+
+        if ( list )    /* close a list */
+        {
+#ifdef DUMP
+            DBG("Closing %sordered list", M_md_list_type==MD_LIST_ORDERED?"":"un");
+#endif
+            if ( M_md_list_type == MD_LIST_ORDERED )
+                M_md_dest = stpcpy(M_md_dest, "</ol>");
+            else
+                M_md_dest = stpcpy(M_md_dest, "</ul>");
+
+            written += 5;
+        }
+    }
 
     *M_md_dest = EOS;
+
+#ifdef DUMP
+    log_long(dest, written, "silgy_render_md result");
+#endif
 
     return dest;
 }
@@ -461,12 +769,13 @@ static void load_err_messages()
     DBG("load_err_messages");
 
     silgy_add_message(OK,                        "EN-US", "OK");
-    silgy_add_message(ERR_INT_SERVER_ERROR,      "EN-US", "Apologies, this is our fault. Please try again later.");
-    silgy_add_message(ERR_SERVER_TOOBUSY,        "EN-US", "Apologies, we are experiencing very high demand right now, please try again in a few minutes.");
     silgy_add_message(ERR_INVALID_REQUEST,       "EN-US", "Invalid HTTP request");
-    silgy_add_message(ERR_NOT_FOUND,             "EN-US", "Page not found");
     silgy_add_message(ERR_UNAUTHORIZED,          "EN-US", "Unauthorized");
     silgy_add_message(ERR_FORBIDDEN,             "EN-US", "Forbidden");
+    silgy_add_message(ERR_NOT_FOUND,             "EN-US", "Page not found");
+    silgy_add_message(ERR_METHOD,                "EN-US", "Method not allowed");
+    silgy_add_message(ERR_INT_SERVER_ERROR,      "EN-US", "Apologies, this is our fault. Please try again later.");
+    silgy_add_message(ERR_SERVER_TOOBUSY,        "EN-US", "Apologies, we are experiencing very high demand right now, please try again in a few minutes.");
     silgy_add_message(ERR_FILE_TOO_BIG,          "EN-US", "File too big");
     silgy_add_message(ERR_REDIRECTION,           "EN-US", "Redirection required");
     silgy_add_message(ERR_ASYNC_NO_SUCH_SERVICE, "EN-US", "No such service");
@@ -475,6 +784,7 @@ static void load_err_messages()
     silgy_add_message(ERR_REMOTE_CALL_STATUS,    "EN-US", "Remote service call returned unsuccessful status");
     silgy_add_message(ERR_REMOTE_CALL_DATA,      "EN-US", "Data returned from the remote service is invalid");
     silgy_add_message(ERR_CSRFT,                 "EN-US", "Your previous session has expired. Please refresh this page before trying again.");
+    silgy_add_message(ERR_RECORD_NOT_FOUND,      "EN-US", "Record not found");
 }
 
 
@@ -2112,6 +2422,30 @@ bool lib_qsd(int ci, const char *fieldname, double *retbuf)
     if ( get_qs_param_raw(ci, fieldname, s, MAX_URI_VAL_LEN) )
     {
         sscanf(s, "%lf", retbuf);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+/* --------------------------------------------------------------------------
+   Get bool value from the query string
+-------------------------------------------------------------------------- */
+bool lib_qsb(int ci, const char *fieldname, bool *retbuf)
+{
+    QSVAL s;
+
+    if ( get_qs_param_raw(ci, fieldname, s, MAX_URI_VAL_LEN) )
+    {
+        if ( s[0] == 't'
+                || s[0] == 'T'
+                || s[0] == '1'
+                || 0==strcmp(s, "on") )
+            *retbuf = true;
+        else
+            *retbuf = false;
+
         return TRUE;
     }
 

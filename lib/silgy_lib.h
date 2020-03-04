@@ -392,7 +392,7 @@ extern "C" {
     void silgy_lib_init(void);
     void silgy_lib_done(void);
     void silgy_safe_copy(char *dst, const char *src, size_t dst_len);
-    char *silgy_render_md(char *dest, const char *src);
+    char *silgy_render_md(char *dest, const char *src, size_t len);
     char *silgy_json_enc(const char *src);
     bool lib_csrft_ok(int ci);
     void silgy_add_message(int code, const char *lang, const char *message, ...);
@@ -422,6 +422,7 @@ extern "C" {
     bool lib_qsi(int ci, const char *fieldname, int *retbuf);
     bool lib_qsf(int ci, const char *fieldname, float *retbuf);
     bool lib_qsd(int ci, const char *fieldname, double *retbuf);
+    bool lib_qsb(int ci, const char *fieldname, bool *retbuf);
     void lib_set_res_status(int ci, int status);
     void lib_res_header(int ci, const char *hdr, const char *val);
     void lib_set_res_content_type(int ci, const char *str);
